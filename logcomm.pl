@@ -17,7 +17,7 @@
 #
 # $DB::single=2;   # remember debug breakpoint
 
-$gVersion = 0.50000;
+$gVersion = 0.51000;
 $gWin = (-e "C:/") ? 1 : 0;       # determine Windows versus Linux/Unix for detail settings
 
 ## Todos
@@ -88,7 +88,7 @@ $gWin = (-e "C:/") ? 1 : 0;       # determine Windows versus Linux/Unix for deta
 
 # CPAN packages used
 use Data::Dumper;               # debug
-use warnings::unused; # debug used to check for unused variables
+#use warnings::unused; # debug used to check for unused variables
 use Time::Local;
 use POSIX qw{strftime};
 
@@ -980,7 +980,7 @@ sub do_rpt {
                $rest =~ /to CMS (\S+) using (\S+)/;
                my $items = $1;
                my $iconn = $2;
-               set_timeline($logtime,$l,$logtimehex,1,"Communications ,substr($rest,1));
+               set_timeline($logtime,$l,$logtimehex,1,"Communications",substr($rest,1));
                $iconn =~ /\[(\d+)\]/;
                $iport = $1;
                if (defined $iport) {
@@ -1462,3 +1462,4 @@ exit;
 }
 #------------------------------------------------------------------------------
 # 0.50000 - new script based on agentaud.pl version 0.87000
+# 0.51000 - Correct syntax error, missing double quote
