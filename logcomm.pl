@@ -5,47 +5,22 @@
 # or disclosure restricted by GSA ADP Schedule Contract with IBM Corp
 #------------------------------------------------------------------------------
 
-#  perl agentaud.pl diagnostic_log
+#  perl logcomm.pl diagnostic_log
 #
-#  Create a report on agent row results from
-#  kpxrpcrq tracing
+#  Create a report on agent Communications from diagnostic log(s)
 #
-#  john alvord, IBM Corporation, 22 December 2014
+#  john alvord, IBM Corporation, 19 August 2019
 #  jalvord@us.ibm.com
 #
-# tested on Windows Activestate 5.20.1
+# tested on Windows Strawberry Perrl 5.26.1
 #
 # $DB::single=2;   # remember debug breakpoint
 
-$gVersion = 0.51000;
+$gVersion = 0.52000;
 $gWin = (-e "C:/") ? 1 : 0;       # determine Windows versus Linux/Unix for detail settings
 
 ## Todos
 
-## Todos
-#  Handle Agent side historical traces - needs definition and work.
-
-#          Data row is filtered
-# (54931626.0DA9-11:kdsflt1.c,1427,"FLT1_FilterRecord") Entry
-# (54931626.0DAC-11:kdsflt1.c,1464,"FLT1_FilterRecord") Exit: 0x1      <=== row fails filter
-# (54931625.023C-3:kdsflt1.c,1464,"FLT1_FilterRecord") Exit: 0x0       <=== row passes filter
-
-#         Potential row data is produced - including sitname
-# (54931626.0DAE-11:kraaevxp.cpp,501,"CreateSituationEvent") *EV-INFO: Input event: obj=0x1111FA530, type=5, excep=0, numbRow=1, rowData=0x110ADF640, status=0, sitname="UNIX_LAA_Bad_su_to_root_Warning"
-# (54931626.0DB2-11:kraaevxp.cpp,562,"CreateSituationEvent") *EV-INFO: Use request <1111FA530> handle <294650831> element <111167790>
-# (54931626.0DB4-11:kraaevxp.cpp,414,"EnqueueEventWork") *EV-INFO: Enqueue event work element 111167790 to Dispatcher
-# (54931626.0DB5-11:kraaprdf.cpp,228,"CheckForException") Exit: 0x0
-# (54931626.0DB7-11:kraulleb.cpp,194,"AddData") Exit: 0x0
-# (unit:kraaevxp,Entry="CreateSituationEvent" detail er)
-#
-#         No data is sent
-# (54931626.0DBB-11:kraadspt.cpp,868,"sendDataToProxy") Entry
-# (54931626.0DBD-11:kraadspt.cpp,955,"sendDataToProxy") Exit
-
-#         Some data is sent
-# (54931626.0DBB-11:kraadspt.cpp,868,"sendDataToProxy") Entry
-# (54931625.04D0-3:kraadspt.cpp,889,"sendDataToProxy") Sending 14 rows for UNIX_LAA_Log_Size_Warning KUL.ULMONLOG, <722472833,294650830>.
-# (54931626.0DBD-11:kraadspt.cpp,955,"sendDataToProxy") Exit
 
 ## !5A9E41FB.0000!========================>  IBM Tivoli RAS1 Service Log  <========================
 ## +5A9E41FB.0000      System Name: USRD12ZDU2005               Process ID: 1684
@@ -67,10 +42,6 @@ $gWin = (-e "C:/") ? 1 : 0;       # determine Windows versus Linux/Unix for deta
 ## (5AA2E3F5.0004-13E0:kdepnpc.c,138,"KDEP_NewPCB") 146.89.140.76: D2F00373, KDEP_pcb_t @ 37618E0 created
 ## (5AAB62B3.0004-1BA0:kdepnpc.c,138,"KDEP_NewPCB") 146.89.140.76: D310034F, KDEP_pcb_t @ 3760D80 created
 
-## (5AA6520D.0000-7DC:kdepdpc.c,62,"KDEP_DeletePCB") D2F00373: KDEP_pcb_t deleted
-
-
-
 ## (5AA2E3F4.0002-13E0:kdepnpc.c,138,"KDEP_NewPCB") 146.89.140.75: D2D0037C, KDEP_pcb_t @ 3761330 created
 ## (5AA2E3F5.0000-13E0:kdepdpc.c,62,"KDEP_DeletePCB") D2D0037C: KDEP_pcb_t deleted
 ## (5AA2E3F5.0004-13E0:kdepnpc.c,138,"KDEP_NewPCB") 146.89.140.76: D2F00373, KDEP_pcb_t @ 37618E0 created
@@ -80,10 +51,6 @@ $gWin = (-e "C:/") ? 1 : 0;       # determine Windows versus Linux/Unix for deta
 ## (5AA31B33.0000-9F0:kdepdpc.c,62,"KDEP_DeletePCB") D470034C: KDEP_pcb_t deleted
 
 
-## (5AA1C09A.0001-11F0:khdxbase.cpp,339,"setError")
-## +5AA1C09A.0001  ERROR MESSAGE: "Unable to open Metafile "C:\IBM\ITM\TMAITM~1\logs\History\K5P\K5PMANAGED.hdr" "
-## (5AA1C09A.0002-11F0:khdxbase.cpp,336,"setError")
-## +5AA1C09A.0002  Error Type= CTX_MetafileNotfound
 
 
 # CPAN packages used
@@ -91,7 +58,6 @@ use Data::Dumper;               # debug
 #use warnings::unused; # debug used to check for unused variables
 use Time::Local;
 use POSIX qw{strftime};
-
 
 my $start_date = "";
 my $start_time = "";
@@ -172,8 +138,44 @@ sub sec2ltime;
 sub do_rpt;
 
 
-# following hashtable is a backup for calculating table lengths.
-# Windows, Linux, Unix tables only at the moment
+# allow user to set impact
+my %advcx = (
+              "COMMAUDIT1001W" => "90",
+              "COMMAUDIT1002W" => "90",
+            );
+
+my $advi = -1;
+my %advtextx = ();
+my $advkey = "";
+my $advtext = "";
+my $advline;
+my %advgotx = ();
+my %advrptx = ();
+
+while (<main::DATA>)
+{
+  $advline = $_;
+  $advline =~ s/\x0d//g if $gWin == 0;
+  if ($advkey eq "") {
+     chomp $advline;
+     $advkey = $advline;
+     next;
+  }
+  if (length($advline) >= 14) {
+     if ((substr($advline,0,9) eq "COMMAUDIT") or (substr($advline,0,10) eq "COMMREPORT")){
+        $advtextx{$advkey} = $advtext;
+        chomp $advline;
+        $advkey = $advline;
+        $advtext = "";
+        next;
+     }
+  }
+  $advtext .= $advline;
+}
+$advtextx{$advkey} = $advtext;
+
+my $anic_ct = 0;
+my $itc_ct = 0;
 
 my %kdemsgx = (
    '00000000' => ["","KDE1_STC_OK"],
@@ -325,9 +327,9 @@ my %commenvx = (
 
 my %porterrx;
 
+my @advimpact = ();
 my $rptkey;
-
-my %advrptx = ();
+my $max_impact = 0;
 
 my $cnt = -1;
 my @oline = ();
@@ -423,6 +425,10 @@ while (@ARGV) {
       shift(@ARGV);
       $opt_logpath = shift(@ARGV);
       die "logpath specified but no path found\n" if !defined $opt_logpath;
+   }  elsif (substr($uword,0,9) eq "COMMAUDIT"){
+         die "unknown advisory code $words[0]" if !defined $advcx{$uword};
+         die "Advisory code $words[0] with no advisory impact" if !defined $words[1];
+         $advcx{$uword} = $words[1];
    } else {
       $logfn = shift(@ARGV);
       die "log file name not defined\n" if !defined $logfn;
@@ -604,7 +610,7 @@ sub do_rpt {
    $segmax = 0;
    %todo = ();
 
-   $hdri++;$hdr[$hdri] = "TEMA Workload Advisory report v$gVersion";
+   $hdri++;$hdr[$hdri] = "Agent Communications Audit report v$gVersion";
    my $audit_start_time = gettime();       # formated current time for report
    $hdri++;$hdr[$hdri] = "Start: $audit_start_time";
 
@@ -891,6 +897,7 @@ sub do_rpt {
                         my @msg_ref = $kdemsgx{$rpc_ref->{KDE1_stc_t}};
                         my $msg_txt = $msg_ref[0][1] . " \"" . $msg_ref[0][0] . "\"";
                         $inotes .= "KDE1_stc_t[$rpc_ref->{KDE1_stc_t} $msg_txt]";
+                        $itc_ct += 1 if $rpc_ref->{'KDE1_stc_t'} eq "1DE0004D";
                      }
                      set_timeline($logtime,$l,$logtimehex,2,"RPC-Fail",$inotes);
                      delete $rpcrunx{$rpckey};
@@ -1033,7 +1040,8 @@ sub do_rpt {
          if ($logentry eq "conv__who_are_you") {
             $oneline =~ /^\((\S+)\)(.+)$/;
             $rest = $2; #  status=1c010008, "activity not in call", ncs/KDC1_STC_NOT_IN_CALL
-            set_timeline($logtime,$l,$logtimehex,0,"ANC",substr($rest,1));
+            set_timeline($logtime,$l,$logtimehex,0,"ANIC",substr($rest,1));
+            $anic_ct += 1;
             next;
          }
       }
@@ -1076,9 +1084,21 @@ sub do_rpt {
 
    }
    set_timeline($logtime,$l,$logtimehex,3,"Log","End",);
+   if ($anic_ct > 0) {
+      $advi++;$advonline[$advi] = "Activity Not in Call count [$anic_ct]";
+      $advcode[$advi] = "COMMAUDIT1001W";
+      $advimpact[$advi] = $advcx{$advcode[$advi]};
+      $advsit[$advi] = "COMM";
+   }
+   if ($itc_ct > 0) {
+      $advi++;$advonline[$advi] = "Invalid Transport Correlator error count [$itc_ct]";
+      $advcode[$advi] = "COMMAUDIT1002W";
+      $advimpact[$advi] = $advcx{$advcode[$advi]};
+      $advsit[$advi] = "COMM";
+   }
 
    # Communication activity timeline
-      $rptkey = "AGENTREPORT010";$advrptx{$rptkey} = 1;         # record report key
+      $rptkey = "COMMREPORT001";$advrptx{$rptkey} = 1;         # record report key
       my $nstate = 1;                                           # waiting for TEMS connection
                                                                # 2 waiting for errors
       my $tems_last = "";
@@ -1219,7 +1239,8 @@ sub do_rpt {
          }
       }
 
-      $rptkey = "AGENTREPORT011";$advrptx{$rptkey} = 1;         # record report key
+
+      $rptkey = "COMMREPORT002";$advrptx{$rptkey} = 1;         # record report key
       $cnt++;$oline[$cnt]="\n";
       $cnt++;$oline[$cnt]="$rptkey: Timeline of Communication events\n";
       $cnt++;$oline[$cnt]="LocalTime,Hextime,Line,Advisory/Report,Notes,\n";
@@ -1264,26 +1285,67 @@ sub do_rpt {
    open OH, ">$ofn" or die "can't open $ofn: $!";
 
    if ($opt_nohdr == 0) {
-      for (my $i=0;$i<=$hdri;$i++) {
-         $outl = $hdr[$i] . "\n";
-         print OH $outl;
-      }
-      print OH "\n";
-   }
-   if ($advisori == -1) {
-      print OH "No Expert Advisory messages\n";
-   } else {
-      for (my $i=0;$i<=$advisori;$i++){
-         print OH "$advisor[$i]\n";
+      for (my $i=0; $i<=$hdri; $i++) {
+         print OH $hdr[$i] . "\n";
       }
    }
    print OH "\n";
 
-   for (my $i=0;$i<=$cnt;$i++) {
+   if ($advi != -1) {
+      print OH "\n";
+      print OH "Advisory Message Report - *NOTE* See advisory notes at report end\n";
+      print OH "Impact,Advisory Code,Object,Advisory,\n";
+      for (my $a=0; $a<=$advi; $a++) {
+          my $mysit = $advsit[$a];
+          my $myimpact = $advimpact[$a];
+          my $mykey = $mysit . "|" . $a;
+          $advx{$mykey} = $a;
+      }
+      foreach $f ( sort { $advimpact[$advx{$b}] <=> $advimpact[$advx{$a}] ||
+                             $advcode[$advx{$a}] cmp $advcode[$advx{$b}] ||
+                             $advsit[$advx{$a}] cmp $advsit[$advx{$b}] ||
+                             $advonline[$advx{$a}] cmp $advonline[$advx{$b}]
+                           } keys %advx ) {
+         my $j = $advx{$f};
+         next if $advimpact[$j] == -1;
+         print OH "$advimpact[$j],$advcode[$j],$advsit[$j],$advonline[$j]\n";
+         $max_impact = $advimpact[$j] if $advimpact[$j] > $max_impact;
+         $advgotx{$advcode[$j]} = $advimpact[$j];
+      }
+   } else {
+      print OH "No Expert Advisory messages\n";
+   }
+
+   print OH "\n";
+
+   for (my $i = 0; $i<=$cnt; $i++) {
       print OH $oline[$i];
    }
 
-   close OH;
+   if ($advi != -1) {
+      print OH "\n";
+      print OH "Advisory Trace, Meaning and Recovery suggestions follow\n\n";
+      foreach $f ( sort { $a cmp $b } keys %advgotx ) {
+         next if substr($f,0,9) ne "TEMSAUDIT";
+         print OH "Advisory code: " . $f  . "\n";
+         print OH "Impact:" . $advgotx{$f}  . "\n";
+         print STDERR "$f missing\n" if !defined $advtextx{$f};
+         print OH $advtextx{$f};
+      }
+   }
+
+   my $rpti = scalar keys %advrptx;
+   if ($rpti != -1) {
+      print OH "\n";
+      print OH "TEMS Audit Reports - Meaning and Recovery suggestions follow\n\n";
+      foreach $f ( sort { $a cmp $b } keys %advrptx ) {
+         next if !defined $advrptx{$f};
+         print STDERR "$f missing\n" if !defined $advtextx{$f};
+         print OH "$f\n";
+         print OH $advtextx{$f};
+      }
+   }
+   close(OH);
    close(ZOP) if $opt_zop ne "";
 }
 
@@ -1463,3 +1525,73 @@ exit;
 #------------------------------------------------------------------------------
 # 0.50000 - new script based on agentaud.pl version 0.87000
 # 0.51000 - Correct syntax error, missing double quote
+# 0.52000 - Convert to Advisory/Report structure.
+__END__
+
+COMMAUDIT1001W
+Text: Activity Not in Call count [count]
+
+Tracing: error
+(5AA2E3F5.0006-13E0:kdcc1wh.c,114,"conv__who_are_you") status=1c010008, "activity not in call", ncs/KDC1_STC_NOT_IN_CALL
+
+Meaning: This is a strong signal of a duplicate agent case.
+ITM uses remote procedure calls to do most of communications
+and this error means that the partner in the communication process
+has made a mistake. One example would be a "call completion"
+that did not correspond with any outstanding RPC at the agent.
+
+Recovery plan: Investigate the TEMS the agent connects
+to for evidence of duplicate agents - especially this one -
+and resolve the issue.
+--------------------------------------------------------------
+
+COMMAUDIT1002W
+Text: Invalid Transport Correlator error count [count]
+
+Tracing: error
++5B6B15BF.0001     e-secs: 0                  mtu: 944         KDE1_stc_t: 1DE0004D
+
+Meaning: This is a strong signal of a duplicate agent case.
+ITM uses remote procedure calls to do most of communications
+and this error means that the partner in the communication process
+rejected the attempted communication because the type of communication
+did not match. For example a ip.pipe communication was sent
+but the partner knew it needed a ip.spipe. It could also be a
+conflict between a simple connection and a EPHEMERAL:Y connection
+or many other cases.
+
+Recovery plan: Investigate the TEMS the agent connects
+to for evidence of duplicate agents - especially this one -
+and resolve the issue.
+--------------------------------------------------------------
+
+COMMREPORT001
+Text: Timeline of TEMS connectivity
+
+Sample Report
+LocalTime,Hextime,Line,Advisory/Report,Notes,
+20180808115304,Log,Start
+20180808115305,REMOTE_odibmp003,ip.spipe:#151.171.86.23[3660],Connecting to TEMS,
+20180808120935,REMOTE_odibmp003,ip.spipe:#151.171.86.23[3660],reconnect to TEMS REMOTE_odibmp003 without obvious comm failure after 0/00:16:30,
+
+Meaning: A high level summary of Agent to TEMS connectivity. This
+case involved an agent that was constantly losing connectivity.
+
+Recovery plan: Investigate further. If needed, work with IBM Support.
+----------------------------------------------------------------
+
+COMMREPORT002
+Text: Timeline of Communication events
+
+Sample Report
+LocalTime,Hextime,Line,Advisory/Report,Notes,
+20180808115304,5B6B11E0,18,Log,Start,
+20180808115304,5B6B11E0,70,EnvironmentVariables,KDE_TRANSPORT=KDC_FAMILIES="HTTP_CONSOLE:N HTTP_SERVER:N HTTP:0 ip.spipe port:3660 ip.pipe use:n sna use:n ip use:n ip6.pipe use:n ip6.spipe use:n ip6 use:n HTTP_SERVER:N",
+20180808115304,5B6B11E0,74,EnvironmentVariables,KDEB_INTERFACELIST="!151.171.33.235",
+20180808115305,5B6B11E1,1149,ANIC,14fe484587be.42.02.97.ab.21.eb.7e.b5: 1,1,5B4B1265,5B4B1265,
+20180808115305,5B6B11E1,1167,ANIC,14fe4845886c.42.02.97.ab.21.eb.7e.b5: 1,1,5B4B1265,5B4B1265,
+
+Meaning: A detailed report on communication events
+
+Recovery plan: Investigate further. If needed, work with IBM Support.
+----------------------------------------------------------------
