@@ -425,10 +425,6 @@ while (@ARGV) {
       shift(@ARGV);
       $opt_logpath = shift(@ARGV);
       die "logpath specified but no path found\n" if !defined $opt_logpath;
-   }  elsif (substr($uword,0,9) eq "COMMAUDIT"){
-         die "unknown advisory code $words[0]" if !defined $advcx{$uword};
-         die "Advisory code $words[0] with no advisory impact" if !defined $words[1];
-         $advcx{$uword} = $words[1];
    } else {
       $logfn = shift(@ARGV);
       die "log file name not defined\n" if !defined $logfn;
@@ -1322,11 +1318,12 @@ sub do_rpt {
       print OH $oline[$i];
    }
 
+#$DB::single=2;
    if ($advi != -1) {
       print OH "\n";
       print OH "Advisory Trace, Meaning and Recovery suggestions follow\n\n";
       foreach $f ( sort { $a cmp $b } keys %advgotx ) {
-         next if substr($f,0,9) ne "TEMSAUDIT";
+         next if substr($f,0,9) ne "COMMAUDIT";
          print OH "Advisory code: " . $f  . "\n";
          print OH "Impact:" . $advgotx{$f}  . "\n";
          print STDERR "$f missing\n" if !defined $advtextx{$f};
