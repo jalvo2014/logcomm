@@ -16,7 +16,7 @@
 #
 # $DB::single=2;   # remember debug breakpoint
 
-$gVersion = 0.52000;
+$gVersion = 0.53000;
 $gWin = (-e "C:/") ? 1 : 0;       # determine Windows versus Linux/Unix for detail settings
 
 ## Todos
@@ -677,6 +677,8 @@ sub do_rpt {
    # print STDERR "working on log $segcurr at $l\n";
 
       chomp($inline);
+
+      next if length($inline) == 0;
       if ($opt_z == 1) {
          if (length($inline) > 132) {
             $inline = substr($inline,0,132);
@@ -904,8 +906,6 @@ sub do_rpt {
        }
 
 
-
-
       if (substr($oneline,0,1) eq "+")  {
          $contkey = substr($oneline,1,13);
          $runref = $contx{$contkey};
@@ -984,12 +984,6 @@ sub do_rpt {
                my $items = $1;
                my $iconn = $2;
                set_timeline($logtime,$l,$logtimehex,1,"Communications",substr($rest,1));
-               $iconn =~ /\[(\d+)\]/;
-               $iport = $1;
-               if (defined $iport) {
-                  my $m = $l . "a";
-                  set_timeline($logtime,$m,$logtimehex,4,"Communications",$iport);  # record TEMS port
-               }
                next;
             }
          }
@@ -1045,14 +1039,46 @@ sub do_rpt {
       #(5AA2E31C.0000-7E4:kdcc1sr.c,642,"rpc__sar") Remote call failure: 1C010001
       #(5AB93569.0000-14C8:kdcc1sr.c,670,"rpc__sar") Connection lost: "ip.spipe:#146.89.140.75:65100", 1C010001:1DE0004D, 30, 100(5), FFFF/40, D140831.1:1.1.1.13, tms_ctbs630fp7:d6305a
 
+      #      RAS1_Printf( RAS1_LINE(This.ccbLineNumber), "%s: "
+      #             "\"%s:%lu\", %08lX:%08lX, %u, %lu(%lu), %04X/%lu, %.*s, %s\n",
+      #             shortMsg, strName, (unsigned long)port,
+      #             (unsigned long)PPFM_STATUS.all, (unsigned long)This.ccbKDE,
+      #             elapsedTime, (unsigned long)ifspec->vers, (unsigned long)opn,
+      #             pTab->KDCR0_HDR.ahint, (unsigned long)pTab->KDCR0_HDR.seq,
+      #             RAS1_LevelStrLen, RAS1_LevelStr,
+      #             pCma->cmaCTBLD->valInfo[CTBLD_INFO_DRIVER]);
+
       if (substr($logunit,0,9) eq "kdcc1sr.c") {
          if ($logentry eq "rpc__sar") {
             $oneline =~ /^\((\S+)\)(.+)$/;
             $rest = $2; #  Endpoint unresponsive: "ip.spipe:#146.89.140.75:3660", 1C010001:1DE0000F, 210, 5(2), FFFF/1, D140831.1:1.1.1.13, tms_ctbs623fp3:d3086a
-            if (substr($rest,1,19) eq "Remote call failure") { # need more work here
+            if (substr($rest,1,19) eq "Remote call failure") { # Endpoint unresponsive: "ip.spipe:#146.89.140.75:3660", 1C010001:1DE0000F, 210, 5(2), FFFF/1, D140831.1:1.1.1.13, tms_ctbs623fp3:d3086a
                my %rpcref = ();
                my $rpckey = $logtime . "|" . $logline;
                $rpcrunx{$rpckey} = \%rpcref;
+            } elsif (substr($rest,1,16) eq "Connection lost:") { # Connection lost: "ip.spipe:#146.89.140.75:65100", 1C010001:1DE0004D, 30, 100(5), FFFF/40, D140831.1:1.1.1.13, tms_ctbs630fp7:d6305a
+               $rest =~ /\"(\S+)\", (\S+):(\S+), (\d+), (\S+), (\S+), (\S+), (\S+)/;
+               my $inameport = $1;    #strNane:port
+               my $istatus = $2;      #PPFM_STATUS.all
+               my $icode   = $3;      #ccbKDE
+               my $ielapsed = $4;     #elapsedTime
+               my $iversion = $5;     #ifspec->vers(opn)
+               my $ihintseq = $6;     #ahint/seq
+               my $ilevel = $7;       #RAS1_LevelStr
+               my $ibuild = $8;       #cmaCTBLD->valInfo[CTBLD_INFO_DRIVER])
+
+               my $llost = sec2ltime($logtime+$local_diff);
+               my $inotes = "lost[$llost] ";
+               $inotes .= 'rmt-endpt' . "[$inameport] " if defined $inameport;
+               $inotes .= "elapsed[$ielapsed] " if defined $ielapsed;
+               my $msg_ref = "";
+               if (defined $icode) {
+                  my @msg_ref = $kdemsgx{$icode};
+                  my $msg_txt = $msg_ref[0][1] . " \"" . $msg_ref[0][0] . "\"";
+                  $inotes .= "$icode $msg_txt]";
+                  $itc_ct += 1 if $icode eq "1DE0004D";
+               }
+               set_timeline($logtime,$l,$logtimehex,2,"RPC-Lost",$inotes);
             } else {
                set_timeline($logtime,$l,$logtimehex,2,"RPC",substr($rest,1));
             }
@@ -1318,7 +1344,6 @@ sub do_rpt {
       print OH $oline[$i];
    }
 
-#$DB::single=2;
    if ($advi != -1) {
       print OH "\n";
       print OH "Advisory Trace, Meaning and Recovery suggestions follow\n\n";
@@ -1523,6 +1548,7 @@ exit;
 # 0.50000 - new script based on agentaud.pl version 0.87000
 # 0.51000 - Correct syntax error, missing double quote
 # 0.52000 - Convert to Advisory/Report structure.
+# 0.53000 - Capture RPC-Lost messages, which have a different form
 __END__
 
 COMMAUDIT1001W
