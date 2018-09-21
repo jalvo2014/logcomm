@@ -16,7 +16,7 @@
 #
 # $DB::single=2;   # remember debug breakpoint
 
-$gVersion = 0.53000;
+$gVersion = 0.56000;
 $gWin = (-e "C:/") ? 1 : 0;       # determine Windows versus Linux/Unix for detail settings
 
 ## Todos
@@ -49,6 +49,7 @@ $gWin = (-e "C:/") ? 1 : 0;       # determine Windows versus Linux/Unix for deta
 
 ## (5AA31B32.0001-9F0:kdepnpc.c,138,"KDEP_NewPCB") 146.89.140.75: D470034C, KDEP_pcb_t @ 375FBA0 created
 ## (5AA31B33.0000-9F0:kdepdpc.c,62,"KDEP_DeletePCB") D470034C: KDEP_pcb_t deleted
+
 
 
 
@@ -142,6 +143,11 @@ sub do_rpt;
 my %advcx = (
               "COMMAUDIT1001W" => "90",
               "COMMAUDIT1002W" => "90",
+              "COMMAUDIT1003W" => "90",
+              "COMMAUDIT1004W" => "90",
+              "COMMAUDIT1005W" => "90",
+              "COMMAUDIT1006W" => "90",
+              "COMMAUDIT1007E" => "100",
             );
 
 my $advi = -1;
@@ -319,13 +325,23 @@ my %commenvx = (
                  'CTIRA_RECONNECT_WAIT' => 1,
                  'CTIRA_MAX_RECONNECT_TRIES' => 1,
                  'KDE_TRANSPORT' => 1,
+                 'KDC_FAMILIES' => 1,
                  'CTIRA_PRIMARY_FALLBACK_INTERVAL' => 1,
                  'KDEB_INTERFACELIST_IPV6' => 1,
                  'KDEB_INTERFACELIST' => 1,
                  'CTIRA_HEARTBEAT' => 1,
               );
 
+my $kdc_families_ct = 0;
+my $kde_transport_ct = 0;
+
+
 my %porterrx;
+
+my $http_unsup = 0;
+my $http_error = 0;
+my $gskit_error = 0;
+my $ide_error = 0;
 
 my @advimpact = ();
 my $rptkey;
@@ -1012,6 +1028,8 @@ sub do_rpt {
                   $envx{$ienv} = 1;
                   set_timeline($logtime,$l,$logtimehex,0,"EnvironmentVariables",substr($rest,1));
                }
+               $kdc_families_ct += 1 if $ienv eq "KDC_FAMILIES";
+               $kde_transport_ct += 1 if $ienv eq "KDE_TRANSPORT";
             }
             next;
          }
@@ -1103,6 +1121,49 @@ sub do_rpt {
             next;
          }
       }
+      # (5B8DF983.0000-794:kdhsiqm.c,745,"KDHS_InboundQueueManager") Unsupported request method ""
+      # (5B8DF983.0001-794:kdhsiqm.c,747,"KDHS_InboundQueueManager") error in HTTP request from ip.tcp:#172.17.176.201:32652, status=7C4C803A, "unknown method in request"
+      if (substr($logunit,0,9) eq "kdhsiqm.c") {
+         if ($logentry eq "KDHS_InboundQueueManager") {
+            $oneline =~ /^\((\S+)\)(.+)$/;
+            $rest = $2; # Unsupported request method ""
+                        # error in HTTP request from ip.tcp:#172.17.176.201:32652, status=7C4C803A, "unknown method in request"
+            $http_unsup += 1 if substr($rest,1,26) eq "Unsupported request method";
+            $http_error += 1 if substr($rest,1,21) eq "error in HTTP request";
+            set_timeline($logtime,$l,$logtimehex,2,"HTTP",substr($rest,1));
+            next;
+         }
+      }
+      # (5B8DF9EF.0002-798:kdebeal.c,81,"ssl_provider_open") GSKit error 402: GSK_ERROR_NO_CIPHERS
+      if (substr($logunit,0,9) eq "kdebeal.c") {
+         if ($logentry eq "ssl_provider_open") {
+            $oneline =~ /^\((\S+)\)(.+)$/;
+            $rest = $2; # GSKit error 402: GSK_ERROR_NO_CIPHERS
+            $gskit_error += 1;
+            set_timeline($logtime,$l,$logtimehex,2,"COMM",substr($rest,1));
+            next;
+         }
+      }
+      # (5B8DFAD8.0001-2784:kdebp0r.c,240,"receive_pipe") Status 1DE00074=KDE1_STC_DATASTREAMINTEGRITYLOST
+      if (substr($logunit,0,9) eq "kdebp0r.c") {
+         if ($logentry eq "receive_pipe") {
+            $oneline =~ /^\((\S+)\)(.+)$/;
+            $rest = $2; # Status 1DE00074=KDE1_STC_DATASTREAMINTEGRITYLOST
+            $ide_error += 1;
+            set_timeline($logtime,$l,$logtimehex,2,"COMM",substr($rest,1));
+            next;
+         }
+      }
+      # (5B922710.0037-AB4:kraafmgr.cpp,500,"InitializeRemoteManager") Agent default host address set to 30.132.50.144
+      if (substr($logunit,0,12) eq "kraafmgr.cpp") {
+         if ($logentry eq "InitializeRemoteManager") {
+            $oneline =~ /^\((\S+)\)(.+)$/;
+            $rest = $2; # Agent default host address set to 30.132.50.144
+            set_timeline($logtime,$l,$logtimehex,2,"COMM",substr($rest,1));
+            next;
+         }
+      }
+
 
    }
    set_timeline($logtime,$l,$logtimehex,3,"Log","End",);
@@ -1115,6 +1176,36 @@ sub do_rpt {
    if ($itc_ct > 0) {
       $advi++;$advonline[$advi] = "Invalid Transport Correlator error count [$itc_ct]";
       $advcode[$advi] = "COMMAUDIT1002W";
+      $advimpact[$advi] = $advcx{$advcode[$advi]};
+      $advsit[$advi] = "COMM";
+   }
+   if ($http_unsup > 0) {
+      $advi++;$advonline[$advi] = "Unsupported HTTP request methods [$http_unsup]";
+      $advcode[$advi] = "COMMAUDIT1003W";
+      $advimpact[$advi] = $advcx{$advcode[$advi]};
+      $advsit[$advi] = "HTTP";
+   }
+   if ($http_error > 0) {
+      $advi++;$advonline[$advi] = "Error HTTP requests[$http_error]";
+      $advcode[$advi] = "COMMAUDIT1004W";
+      $advimpact[$advi] = $advcx{$advcode[$advi]};
+      $advsit[$advi] = "HTTP";
+   }
+   if ($gskit_error > 0) {
+      $advi++;$advonline[$advi] = "GSKIT Errors[$gskit_error]";
+      $advcode[$advi] = "COMMAUDIT1005W";
+      $advimpact[$advi] = $advcx{$advcode[$advi]};
+      $advsit[$advi] = "COMM";
+   }
+   if ($ide_error > 0) {
+      $advi++;$advonline[$advi] = "KDE Errors[$ide_error]";
+      $advcode[$advi] = "COMMAUDIT1006W";
+      $advimpact[$advi] = $advcx{$advcode[$advi]};
+      $advsit[$advi] = "COMM";
+   }
+   if (($kdc_families_ct + $kde_transport_ct) > 1) {
+      $advi++;$advonline[$advi] = "Invalid communication controls - both KDC_FAMILIES and KDE_TRANSPORT are present";
+      $advcode[$advi] = "COMMAUDIT1007E";
       $advimpact[$advi] = $advcx{$advcode[$advi]};
       $advsit[$advi] = "COMM";
    }
@@ -1549,6 +1640,9 @@ exit;
 # 0.51000 - Correct syntax error, missing double quote
 # 0.52000 - Convert to Advisory/Report structure.
 # 0.53000 - Capture RPC-Lost messages, which have a different form
+# 0.54000 - Capture Port Scanning type messages
+# 0.55000 - Advisory on mixed KDC_FAMILIES and KDE_TRANSPORT
+# 0.56000 - Add Default host address to timeline
 __END__
 
 COMMAUDIT1001W
@@ -1585,6 +1679,120 @@ or many other cases.
 
 Recovery plan: Investigate the TEMS the agent connects
 to for evidence of duplicate agents - especially this one -
+and resolve the issue.
+--------------------------------------------------------------
+
+COMMAUDIT1003W
+Text: Unsupported HTTP request methods [count]
+
+Tracing: error
+(5B8E17E5.0000-794:kdhsiqm.c,745,"KDHS_InboundQueueManager") Unsupported request method "TRACE"
+
+Meaning: This is a strong signal that the agent is being
+subject to port scan testing. ITM does not defend against
+such activities. See this document for a statement:
+
+APM: Port scanner usage and known limitations with IBM Tivoli Monitoring
+https://www.ibm.com/developerworks/community/blogs/0587adbc-8477-431f-8c68-9226adea11ed/entry/Port_scanner_usage_and_known_limitations_with_IBM_Tivoli_Monitoring?lang=en
+
+On agents, the impact can be reduced by setting HTTP_SERVER:N so as
+not to run the internal web server. Also EPHEMERAL:Y will eliminate the
+Agent listening port. That is not always possible but if you cannot
+convince your security team to exempt ITM processes, it will reduce
+the impact.
+
+Recovery plan: Investigate and eliminate usage of port
+scan testing.
+--------------------------------------------------------------
+
+COMMAUDIT1004W
+Text: Error HTTP requests[count]
+
+Tracing: error
+(5B8E17E5.0000-794:kdhsiqm.c,745,"KDHS_InboundQueueManager") Unsupported request method "TRACE"
+
+Meaning: This is a strong signal that the agent is being
+subject to port scan testing. ITM does not defend against
+such activities. See this document for a statement:
+
+APM: Port scanner usage and known limitations with IBM Tivoli Monitoring
+https://www.ibm.com/developerworks/community/blogs/0587adbc-8477-431f-8c68-9226adea11ed/entry/Port_scanner_usage_and_known_limitations_with_IBM_Tivoli_Monitoring?lang=en
+
+On agents, the impact can be reduced by setting HTTP_SERVER:N so as
+not to run the internal web server. Also EPHEMERAL:Y will eliminate the
+Agent listening port. That is not always possible but if you cannot
+convince your security team to exempt ITM processes, it will reduce
+the impact.
+
+Recovery plan: Investigate and eliminate usage of port
+scan testing.
+--------------------------------------------------------------
+
+COMMAUDIT1005W
+Text: GSKIT Errors[count]
+
+Tracing: error
+(5B8E17F3.0000-798:kdebeal.c,81,"ssl_provider_open") GSKit error 402: GSK_ERROR_NO_CIPHERS
+
+Meaning: This is a strong signal that the agent is being
+subject to port scan testing. ITM does not defend against
+such activities. See this document for a statement:
+
+APM: Port scanner usage and known limitations with IBM Tivoli Monitoring
+https://www.ibm.com/developerworks/community/blogs/0587adbc-8477-431f-8c68-9226adea11ed/entry/Port_scanner_usage_and_known_limitations_with_IBM_Tivoli_Monitoring?lang=en
+
+On agents, the impact can be reduced by setting HTTP_SERVER:N so as
+not to run the internal web server. Also EPHEMERAL:Y will eliminate the
+Agent listening port. That is not always possible but if you cannot
+convince your security team to exempt ITM processes, it will reduce
+the impact.
+
+Recovery plan: Investigate and eliminate usage of port
+scan testing.
+--------------------------------------------------------------
+
+COMMAUDIT1006W
+Text: KDE Errors[count]
+
+Tracing: error
+(5B8E0245.0001-146C:kdebp0r.c,240,"receive_pipe") Status 1DE00074=KDE1_STC_DATASTREAMINTEGRITYLOST
+
+Meaning: This is a communication error. If the error name is
+KDE1_STC_DATASTREAMINTEGRITYLOST, this is a strong signal that
+the agent is being subject to port scan testing. ITM does not defend
+against such activities. See this document for a statement:
+
+APM: Port scanner usage and known limitations with IBM Tivoli Monitoring
+https://www.ibm.com/developerworks/community/blogs/0587adbc-8477-431f-8c68-9226adea11ed/entry/Port_scanner_usage_and_known_limitations_with_IBM_Tivoli_Monitoring?lang=en
+
+On agents, the impact can be reduced by setting HTTP_SERVER:N so as
+not to run the internal web server. Also EPHEMERAL:Y will eliminate the
+Agent listening port. That is not always possible but if you cannot
+convince your security team to exempt ITM processes, it will reduce
+the impact.
+
+Recovery plan: Investigate and eliminate usage of port
+scan testing. If this is not port scanning, work with IBM support
+to diagnose and resolve the issue.
+--------------------------------------------------------------
+
+COMMAUDIT1007E
+Text: Invalid communication controls - both KDC_FAMILIES and KDE_TRANSPORT are present
+
+Tracing: error
+
+Meaning: An ITM process should have only one communication string
+defined. There should be an environment variable KDC_FAMILIES or
+an environment variable KDE_TRANSPORT.
+
+When both are present, one part of ITM communications uses one
+and another part uses the other. This often leads to communication
+errors and agent malfunction. Sometimes it barely struggles along
+but usually there is a severe error like unable to connect to the
+historical data collector WPA or HD agent.
+
+Recovery plan: Configure the agent to use just one communications
+control. If this is not obvious, work with IBM support to diagnose
 and resolve the issue.
 --------------------------------------------------------------
 
