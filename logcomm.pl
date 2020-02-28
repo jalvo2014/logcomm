@@ -12,15 +12,19 @@
 #  john alvord, IBM Corporation, 19 August 2019
 #  jalvord@us.ibm.com
 #
-# tested on Windows Strawberry Perrl 5.26.1
+# tested on Windows Strawberry Perl 5.26.1
 #
 # $DB::single=2;   # remember debug breakpoint
 
-$gVersion = 0.56000;
+$gVersion = 0.60000;
 $gWin = (-e "C:/") ? 1 : 0;       # determine Windows versus Linux/Unix for detail settings
 
 ## Todos
 
+## !!Check tasklist.info and see processes under more than one process ids
+## UID        PID  PPID   LWP  C NLWP STIME TTY          TIME CMD
+## root      7611     1  7611  0   61 Jun13 ?        00:00:36 /opt/IBM/ITM/lx8266/lz/bin/klzagent
+## root     12164     1 12164  0   57 09:39 ?        00:00:00 /opt/IBM/ITM/lx8266/lz/bin/klzagent
 
 ## !5A9E41FB.0000!========================>  IBM Tivoli RAS1 Service Log  <========================
 ## +5A9E41FB.0000      System Name: USRD12ZDU2005               Process ID: 1684
@@ -50,7 +54,10 @@ $gWin = (-e "C:/") ? 1 : 0;       # determine Windows versus Linux/Unix for deta
 ## (5AA31B32.0001-9F0:kdepnpc.c,138,"KDEP_NewPCB") 146.89.140.75: D470034C, KDEP_pcb_t @ 375FBA0 created
 ## (5AA31B33.0000-9F0:kdepdpc.c,62,"KDEP_DeletePCB") D470034C: KDEP_pcb_t deleted
 
-
+##  (5BCDDA1E.0019-5A0:kbbssge.c,72,"BSS1_GetEnv") CTIRA_HOSTNAME="cex_mxoccans02"
+##  (5BCDDA1E.001A-5A0:kbbssge.c,72,"BSS1_GetEnv") CTIRA_NODETYPE="NT"
+##  (5BCDDA1E.001B-5A0:kraafmgr.cpp,2100,"DeriveFullHostname") Full hostname set to "cex_mxoccans02:NT"
+##  (5BCDDA1E.001C-5A0:kbbssge.c,72,"BSS1_GetEnv") CTIRA_SYSTEM_NAME="cex_mxoccans02"
 
 
 
@@ -63,6 +70,7 @@ use POSIX qw{strftime};
 my $start_date = "";
 my $start_time = "";
 my $local_diff = -1;
+my $system_name = "";
 
 # This is a typical log scraping program. The log data looks like this
 #
@@ -134,6 +142,9 @@ my $opt_v;
 my $opt_vv;
 my $opt_cmdall;                                  # show all commands
 
+my %cmslx;
+my %kdcx;
+
 sub gettime;                             # get time
 sub sec2ltime;
 sub do_rpt;
@@ -148,6 +159,12 @@ my %advcx = (
               "COMMAUDIT1005W" => "90",
               "COMMAUDIT1006W" => "90",
               "COMMAUDIT1007E" => "100",
+              "COMMAUDIT1008E" => "100",
+              "COMMAUDIT1009E" => "100",
+              "COMMAUDIT1010W" => "90",
+              "COMMAUDIT1011W" => "95",
+              "COMMAUDIT1012W" => "95",
+              "COMMAUDIT1013W" => "90",
             );
 
 my $advi = -1;
@@ -320,6 +337,7 @@ my %kdemsgx = (
    '1DE00084' => ["RFC1833 portmap request error","KDE1_STC_PORTMAPREQUESTERROR"],
               );
 
+
 my %commenvx = (
                  'CT_CMSLIST' => 1,
                  'CTIRA_RECONNECT_WAIT' => 1,
@@ -330,11 +348,15 @@ my %commenvx = (
                  'KDEB_INTERFACELIST_IPV6' => 1,
                  'KDEB_INTERFACELIST' => 1,
                  'CTIRA_HEARTBEAT' => 1,
+                 'CTIRA_HOSTNAME' => 1,
+                 'CTIRA_NODETYPE' => 1,
+                 'CTIRA_SYSTEM_NAME' => 1,
+                 'KDC_PARTITION' => 1,
               );
 
 my $kdc_families_ct = 0;
 my $kde_transport_ct = 0;
-
+my $kdc_partition_ct = 0;
 
 my %porterrx;
 
@@ -363,9 +385,12 @@ my @seg = ();
 my @seg_time = ();
 my $segi = -1;
 my $segp = -1;
-my $segcur = "";
+my $segcurr = "";
 my $segline;
 my $segmax = 0;
+my $rc;
+my $this_hostname;
+my $this_system_name;
 
 
 
@@ -378,6 +403,7 @@ my $opt_o;                                   # when defined filename of report f
 my $opt_tsit;                                # when defined debug testing sit
 my $opt_slot;                                # when defined specify history slots, default 60 minutes
 my $opt_pc;
+my $opt_inv;
 my $opt_allenv;                              # when 1 dump all environment variables
 my $opt_allinv;                              # when 1 dump all environment variables
 my $opt_merge;
@@ -409,6 +435,10 @@ while (@ARGV) {
       shift(@ARGV);
       $opt_pc = shift(@ARGV);
       die "Option -pc with no product code set" if !defined $opt_pc;
+   } elsif ($ARGV[0] eq "-inv") {
+      shift(@ARGV);
+      $opt_inv = shift(@ARGV);
+      die "Option -inv with no inventory name" if !defined $opt_inv;
    } elsif ($ARGV[0] eq "-o") {
       shift(@ARGV);
       if (defined $ARGV[0]) {
@@ -449,6 +479,7 @@ while (@ARGV) {
 
 
 die "logpath and -z must not be supplied together\n" if defined $opt_z and defined $opt_logpath;
+die "-pc and -inv must not be supplied together\n" if defined $opt_pc and defined $opt_inv;
 
 if (!defined $opt_logpath) {$opt_logpath = "";}
 if (!defined $logfn) {$logfn = "";}
@@ -466,6 +497,7 @@ if (!defined $opt_allinv) {$opt_allinv = 0;}
 if (!defined $opt_allinv) {$opt_allinv = 0;}
 if (!defined $opt_vv) {$opt_vv = 0;}
 if (!defined $opt_pc) {$opt_pc = "";}
+if (!defined $opt_inv) {$opt_inv = "";}
 $opt_merge = $opt_allinv;
 
 open( ZOP, ">$opt_zop" ) or die "Cannot open zop file $opt_zop : $!" if $opt_zop ne "";
@@ -508,21 +540,27 @@ my %todo = ();     # associative array of names and first identified timestamp
 my $skipzero = 0;
 
 if ($logfn eq "") {
-   $pattern = "_ms(_kdsmain)?\.inv";
-#   $pattern = "_" . $opt_pc . "_k" . $opt_pc . "agent\.inv" if $opt_pc ne "";
-   $pattern = "_k" . $opt_pc . "agent\.inv" if $opt_pc ne "";
-   $pattern = "_" . $opt_pc . "_k" . $opt_pc . "cma\.inv" if $opt_pc eq "nt";
    @results = ();
-   opendir(DIR,$opt_logpath) || die("cannot opendir $opt_logpath: $!\n"); # get list of files
-   @results = grep {/$pattern/} readdir(DIR);
-#DB::single=2;
-   closedir(DIR);
-   die "No _*.inv found\n" if $#results == -1;
+   $results[0] = $opt_inv if $opt_inv ne "";
+   if ($opt_pc ne "") {
+      $pattern = "_ms(_kdsmain)?\.inv";
+   #   $pattern = "_" . $opt_pc . "_k" . $opt_pc . "agent\.inv" if $opt_pc ne "";
+      $pattern = "_k" . $opt_pc . "agent\.inv" if $opt_pc ne "";
+      $pattern = "_" . $opt_pc . "_k" . $opt_pc . "cma\.inv" if $opt_pc eq "nt";
+   #  $pattern = "_" . $opt_pc . "_" . $opt_pc . "_.*\.inv" if $opt_pc eq "mq";
+      $pattern = "_" . $opt_pc . "_.*\.inv" if $opt_pc eq "mq";
+      $pattern = "_" . $opt_pc . "_.*\.inv" if $opt_pc eq "ms";
+      opendir(DIR,$opt_logpath) || die("cannot opendir $opt_logpath: $!\n"); # get list of files
+      @results = grep {/$pattern/} readdir(DIR);
+      closedir(DIR);
+      die "No _*.inv found\n" if $#results == -1;
+   }
    $logfn =  $results[0];
    if ($#results > 0) {         # more than one inv file - determine which one has most recent date
       my $last_modify = 0;
       $logfn =  $results[0];
       for my $r (@results) {
+         next if substr($r,-4,4) ne ".inv";
          my $testpath = $opt_logpath . $r;
          my $modify = (stat($testpath))[9];
          if ($last_modify == 0) {
@@ -536,6 +574,65 @@ if ($logfn eq "") {
       }
    }
 }
+
+
+$pattern = '(\S+)\.env$';
+@results = ();
+opendir(ENVD,$opt_logpath) || die("cannot opendir $opt_logpath: $!\n"); # get list of files
+@results = grep {/$pattern/} readdir(ENVD);
+closedir(ENVD);
+my $env_ct;
+my @envlines;
+my $env_eph = 0;
+my $env_anon = 0;
+my $env_excl = 0;
+my $excl_err = "";
+my $eph_err = "";
+my $do_env = 1;
+if ($#results != -1) {
+   $env_ct = $#results + 1;
+   foreach my $f (@results) {
+      my $full_envfn = $opt_logpath . $f;
+      open(ENV,"< $full_envfn") || die("Could not open inv  $full_envfn\n");
+      my @envl = <ENV>;
+      close(ENV);
+      my $l = 0;
+      die "empty ENV file $full_envfn\n" if $#envl == -1;
+      foreach my $inline (@envl) {
+         $l += 1;
+         chop($inline);
+         if (index($inline,"KDC_FAMILIES=") != -1) {
+            my @envdet = ["EPH",$f,$l,$inline];
+            push @envlines,\@envdet;
+            $kdcx{$inline} = 1;
+            $env_eph += 1 if index($inline,"EPHEMERAL:Y") != -1;
+         } elsif (index($inline,"KDEB_INTERFACELIST=") != -1){
+            $env_excl += 1 if index($inline,"KDEB_INTERFACELIST=!") != -1;
+            my @envdet = ["EXCL",$f,$l,$inline];
+            push @envlines,\@envdet;
+         } elsif (index($inline,"KDCB0_HOSTNAME=") != -1){
+            my @envdet = ["EXCL",$f,$l,$inline];
+            push @envlines,\@envdet;
+         } elsif (index($inline,"CT_CMSLIST=") != -1){
+            my @envdet = ["CMSL",$f,$l,$inline];
+            push @envlines,\@envdet;
+            $cmslx{$inline} = 1;
+         }
+      }
+   }
+}
+
+if ($env_eph > 0) {
+   if ($env_eph != $env_ct) {
+      $eph_err = "Conflicting EPHEMERAL:Y Configuration";
+   }
+}
+if ($env_excl > 0) {
+   if ($env_excl != $env_ct) {
+      $excl_err = "Conflicting Anonymous/Exclusive binds";
+   }
+}
+
 
 my %logbasex;
 $full_logfn = $opt_logpath . $logfn;
@@ -617,16 +714,23 @@ sub do_rpt {
    @seg_time = ();
    $segi = -1;
    $segp = -1;
-   $segcur = "";
+   $segcurr = "";
    $segline = "";
    $segmax = 0;
    %todo = ();
+   $kdc_families_ct = 0;
+   $kde_transport_ct = 0;
+   $kdc_partition_ct = 0;
+   $anic_ct = 0;
+   $itc_ct = 0;
+   $advi = -1;
 
    $hdri++;$hdr[$hdri] = "Agent Communications Audit report v$gVersion";
    my $audit_start_time = gettime();       # formated current time for report
    $hdri++;$hdr[$hdri] = "Start: $audit_start_time";
 
-   open_kib();
+   $rc = open_kib();
+   return if $rc != 0;
 
    $l = 0;
 
@@ -844,11 +948,20 @@ sub do_rpt {
             }
          }
       }
-      if ($start_time eq "") {
+      if ($start_date eq "") {
          if (substr($oneline,0,1) eq "+") {
-            if (index($oneline,"Start Time:") != -1) {
-               $oneline =~ /Start Time: (\d{2}:\d{2}:\d{2})/;
-               $start_time = $1 if defined $1;
+            if (index($oneline,"Start Date:") != -1) {
+               $oneline =~ /Start Date: (\d{4}\/\d{2}\/\d{2})/;
+               $start_date = $1 if defined $1;
+            }
+         }
+      }
+
+      if ($system_name eq "") {
+         if (substr($oneline,0,1) eq "+") {
+            if (index($oneline,"System Name:") != -1) {
+               $oneline =~ /System Name: (\S+) /;
+               $system_name = $1 if defined $1;
             }
          }
        }
@@ -1023,13 +1136,17 @@ sub do_rpt {
             $rest = $2; # CT_CMSLIST="IP.SPIPE:146.89.140.75;IP.PIPE:146.89.140.75;IP.SPIPE:146.89.140.76;IP.PIPE:146.89.140.76"
             $rest =~ / (\S+?)=(.*)/;
             my $ienv = $1;
+            my $val = $2;
             if (!defined $envx{$ienv}) {
                if (($opt_allenv == 1) or (defined $commenvx{$ienv})) {
                   $envx{$ienv} = 1;
                   set_timeline($logtime,$l,$logtimehex,0,"EnvironmentVariables",substr($rest,1));
                }
                $kdc_families_ct += 1 if $ienv eq "KDC_FAMILIES";
-               $kde_transport_ct += 1 if $ienv eq "KDE_TRANSPORT";
+               $kde_transport_ct += 1 if ($ienv eq "KDE_TRANSPORT") and (substr($val,0,12) ne "KDC_FAMILIES");
+               $kdc_partition_ct = 1 if ($ienv eq "KDC_PARTITION") and ($val ne '""');
+               $this_hostname = $2 if $1 eq "CTIRA_HOSTNAME";
+               $this_system_name = $2 if $1 eq "CTIRA_SYSTEM_NAME";
             }
             next;
          }
@@ -1155,10 +1272,17 @@ sub do_rpt {
          }
       }
       # (5B922710.0037-AB4:kraafmgr.cpp,500,"InitializeRemoteManager") Agent default host address set to 30.132.50.144
+      # (5BCDDA1E.001B-5A0:kraafmgr.cpp,2100,"DeriveFullHostname") Full hostname set to "cex_mxoccans02:NT"
+
       if (substr($logunit,0,12) eq "kraafmgr.cpp") {
          if ($logentry eq "InitializeRemoteManager") {
             $oneline =~ /^\((\S+)\)(.+)$/;
             $rest = $2; # Agent default host address set to 30.132.50.144
+            set_timeline($logtime,$l,$logtimehex,2,"COMM",substr($rest,1));
+            next;
+         } elsif ($logentry eq "DeriveFullHostname") {
+            $oneline =~ /^\((\S+)\)(.+)$/;
+            $rest = $2; # Full hostname set to "cex_mxoccans02:NT"
             set_timeline($logtime,$l,$logtimehex,2,"COMM",substr($rest,1));
             next;
          }
@@ -1203,6 +1327,7 @@ sub do_rpt {
       $advimpact[$advi] = $advcx{$advcode[$advi]};
       $advsit[$advi] = "COMM";
    }
+
    if (($kdc_families_ct + $kde_transport_ct) > 1) {
       $advi++;$advonline[$advi] = "Invalid communication controls - both KDC_FAMILIES and KDE_TRANSPORT are present";
       $advcode[$advi] = "COMMAUDIT1007E";
@@ -1210,7 +1335,53 @@ sub do_rpt {
       $advsit[$advi] = "COMM";
    }
 
-   # Communication activity timeline
+   if ($kdc_partition_ct == 1) {
+      $advi++;$advonline[$advi] = "Unusual configuration KDC_PARTITION specified";
+      $advcode[$advi] = "COMMAUDIT1010W";
+      $advimpact[$advi] = $advcx{$advcode[$advi]};
+      $advsit[$advi] = "COMM";
+   }
+
+   if ($excl_err ne "") {
+      $advi++;$advonline[$advi] = "Conflicting Anonymous/Exclusive binds";
+      $advcode[$advi] = "COMMAUDIT1008E";
+      $advimpact[$advi] = $advcx{$advcode[$advi]};
+      $advsit[$advi] = "TEMA";
+   }
+
+   if ($eph_err ne "") {
+      $advi++;$advonline[$advi] = "Conflicting EPHEMERAL:Y Configuration";
+      $advcode[$advi] = "COMMAUDIT1009E";
+      $advimpact[$advi] = $advcx{$advcode[$advi]};
+      $advsit[$advi] = "TEMA";
+   }
+   my $kdc_ct = scalar keys %kdcx;
+   if ($kdc_ct > 1) {
+      $advi++;$advonline[$advi] = "Conflicting KDC_FAMILIES settings - See Report COMMREPORT003";
+      $advcode[$advi] = "COMMAUDIT1011W";
+      $advimpact[$advi] = $advcx{$advcode[$advi]};
+      $advsit[$advi] = "TEMA";
+   }
+
+   my $cmsl_ct = scalar keys %cmslx;
+   if ($cmsl_ct > 1) {
+      $advi++;$advonline[$advi] = "Conflicting CT_CMSLIST settings - See Report COMMREPORT003";
+      $advcode[$advi] = "COMMAUDIT1012W";
+      $advimpact[$advi] = $advcx{$advcode[$advi]};
+      $advsit[$advi] = "TEMA";
+   }
+   if (defined $this_hostname) {
+      if (defined $this_system_name) {
+         if ($this_hostname ne $this_system_name) {
+            $advi++;$advonline[$advi] = "Conflicting CTIRA_HOSTNAME[$this_hostname] versus CTIRA_SYSTEM_NAME[$this_system_name]";
+            $advcode[$advi] = "COMMAUDIT1013W";
+            $advimpact[$advi] = $advcx{$advcode[$advi]};
+            $advsit[$advi] = "TEMA";
+         }
+      }
+   }
+
+#   # Communication activity timeline
       $rptkey = "COMMREPORT001";$advrptx{$rptkey} = 1;         # record report key
       my $nstate = 1;                                           # waiting for TEMS connection
                                                                # 2 waiting for errors
@@ -1388,6 +1559,30 @@ sub do_rpt {
             $timelinexx{$mkey} = \%mlref;
          }
    }
+   if ($do_env == 1) {
+      $rptkey = "COMMREPORT003";$advrptx{$rptkey} = 1;         # record report key
+      $cnt++;$oline[$cnt]="\n";
+      $cnt++;$oline[$cnt]="$rptkey: System ENV report\n";
+      $cnt++;$oline[$cnt]="Type,File,LineNum,Line,\n";
+      foreach my $h (@envlines) {
+         my @ah = @{$h};
+         next if $ah[0][0] ne "CMSL";
+         $outl = $ah[0][0] . ",";
+         $outl .= $ah[0][1] . ",";
+         $outl .= $ah[0][2] . ",";
+         $outl .= $ah[0][3] . ",";
+         $cnt++;$oline[$cnt]="$outl\n";
+      }
+      foreach my $h (@envlines) {
+         my @ah = @{$h};
+         next if $ah[0][0] eq "CMSL";
+         $outl = $ah[0][0] . ",";
+         $outl .= $ah[0][1] . ",";
+         $outl .= $ah[0][2] . ",";
+         $outl .= $ah[0][3] . ",";
+         $cnt++;$oline[$cnt]="$outl\n";
+      }
+   }
 
    if ($opt_pc ne "") {
       $opt_o = "logcomm_" . $opt_pc . ".csv" if $opt_o eq "logcomm.csv";
@@ -1430,6 +1625,7 @@ sub do_rpt {
    }
 
    print OH "\n";
+   print OH "System Name: $system_name\n\n" if $system_name ne "";
 
    for (my $i = 0; $i<=$cnt; $i++) {
       print OH $oline[$i];
@@ -1474,7 +1670,10 @@ sub open_kib {
       opendir(DIR,$opt_logpath) || die("cannot opendir $opt_logpath: $!\n");
       @dlogfiles = grep {/$logpat/} readdir(DIR);
       closedir(DIR);
-      die "no log files found with given specifcation\n" if $#dlogfiles == -1;
+      if ($#dlogfiles == -1) {
+         warn "no log files found with given specifcation $logpat\n";
+         return 1;
+      }
 
       my $dlog;          # fully qualified name of diagnostic log
       my $oneline;       # local variable
@@ -1514,6 +1713,7 @@ sub open_kib {
          $seg_time[$segi] = $todo{$f};
       }
    }
+   return 0;
 }
 sub close_kib {
    close(KIB);
@@ -1643,6 +1843,10 @@ exit;
 # 0.54000 - Capture Port Scanning type messages
 # 0.55000 - Advisory on mixed KDC_FAMILIES and KDE_TRANSPORT
 # 0.56000 - Add Default host address to timeline
+# 0.57000 - Add in system name and some CTIRA variables if present
+# 0.58000 - Add in ENV checking if the files are present
+# 0.59000 - Add in KDC_PARTITION checking - rare and usually an error
+# 0.60000 - Add advisory for different CTIRA_HOSTNAME and CTIRA_SYSTEM_NAME
 __END__
 
 COMMAUDIT1001W
@@ -1796,6 +2000,105 @@ control. If this is not obvious, work with IBM support to diagnose
 and resolve the issue.
 --------------------------------------------------------------
 
+COMMAUDIT1008E
+Text: Conflicting Anonymous/Exclusive binds
+
+Tracing: error
+
+There are several agents present. Some have exclusive binds as
+seen by the KDEB_INTERFACELIST=!xx.xx.xx.xx and some do not. This
+creates an serious configuration issue where communications from
+one agent can cancel another agent's communication.
+
+Whenever exclusive bind is used, all ITM process must use that
+exclusive bind in a coordinated fashion.
+
+If anonymous bind is used no use of KDEB_INTERFACELIST=! etc, all
+ITM processes must use anonymous bind.
+
+Recovery plan: Configure the agents to use just one KDEB_INTERFACELIST
+correctly. If this is not obvious, work with IBM support to diagnose
+and resolve the issue.
+--------------------------------------------------------------
+
+COMMAUDIT1009E
+Text: Conflicting EPHEMERAL:Y Configuration
+
+Tracing: error
+
+Meaning: EPHEMERAL:Y is a way to configure an agent to work with
+the TEMS and a WPA on the TEMS system without requiring any
+obvious TCP listening ports.
+
+If there are multiple ITM Agents on a system, they should all use
+EPHEMERAL:Y or all not use it. If that is violated communications
+will fail randomly.
+
+Note that TEMS/WPA/TEPS can never use EPHEMERAL:Y. If set that
+way they cannot function.
+
+There is log which can allow a single agent with EPHEMERAL:Y to
+work OK with a single other agent without EPHEMERAL:Y. However
+that could fail any time a third agent is installed. Therefore
+best practice is to configure them all one way or the other.
+
+Recovery plan: Configure the agents to use all EPHEMERAL:Y or all
+without that.
+--------------------------------------------------------------
+
+COMMAUDIT1010W
+Text: Unusual configuration KDC_PARTITION specified
+
+Tracing: error
+
+Meaning: KDC_PARTITION was an early way to project ITM communications
+beyond a single firewall. It is rarely seen and usually means
+a configuration error. If communication errors are being observed
+then this should be checked. In several cases the value was 0
+
+Recovery plan: Reconfigure ITM process without partition setting null.
+--------------------------------------------------------------
+
+COMMAUDIT1011W
+Text: Conflicting KDC_FAMILIES settings - See Report COMMREPORT003
+
+Tracing: error
+
+Meaning: KDC_FAMILIES specifies how an agent should connect to a
+TEMS [hub or remote]. If these are different it could be a
+configuration accident.
+
+Recovery plan: Review the agent configuration to make sure they
+are consistent with what is required.
+--------------------------------------------------------------
+
+COMMAUDIT1012W
+Text: Conflicting CT_CMSLIST settings - See Report COMMREPORT003
+
+Tracing: error
+
+Meaning: CT_CMSLIST specifies the systems where a TEMS will be
+found where the agent connects. If these are different it could be a
+configuration accident.
+
+Recovery plan: Review the agent configuration to make sure they
+are consistent with what is required.
+--------------------------------------------------------------
+
+COMMAUDIT1013W
+Text: Conflicting CTIRA_HOSTNAME[name] versus CTIRA_SYSTEM_NAME[name]
+
+Tracing: error
+
+Meaning: CTIRA_HOSTNAME defines the agent name as TEMS sees it.
+CITRA_HOST_NAME defines the agent name as seen in the TEP Navigator.
+When they are different, an element of confusion arises which can
+slow diagnosis time.
+
+Recovery plan: Review the agent configuration and make sure that
+CTIRA_HOSTNAME and CTIRA_SYSTEM_NAME are the same.
+--------------------------------------------------------------
+
 COMMREPORT001
 Text: Timeline of TEMS connectivity
 
@@ -1823,6 +2126,22 @@ LocalTime,Hextime,Line,Advisory/Report,Notes,
 20180808115305,5B6B11E1,1167,ANIC,14fe4845886c.42.02.97.ab.21.eb.7e.b5: 1,1,5B4B1265,5B4B1265,
 
 Meaning: A detailed report on communication events
+
+Recovery plan: Investigate further. If needed, work with IBM Support.
+----------------------------------------------------------------
+
+COMMREPORT003
+Text: System ENV report
+
+Sample Report
+Type,File,LineNum,Line,
+EPH,5h.env,48,KDC_FAMILIES=ip.spipe HTTP_SERVER:N
+,EPH,70.env,47,KDC_FAMILIES=ip.spipe HTTP_SERVER:N
+,EPH,lz.env,42,KDC_FAMILIES=ip.spipe port:3660 ip.pipe port:1918 ip use:n sna use:n EPHEMERAL:Y HTTP_SERVER:N
+,EPH,ul.env,40,KDC_FAMILIES=ip.spipe port:3660 ip.pipe port:1918 ip use:n sna use:n EPHEMERAL:Y HTTP_SERVER:N
+
+Meaning: When a KDEB_INTERFACELIST or EPHEMERAL:Y conflict is seen, this report shows the
+relevant lines in the env files.
 
 Recovery plan: Investigate further. If needed, work with IBM Support.
 ----------------------------------------------------------------
