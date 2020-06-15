@@ -16,7 +16,7 @@
 #
 # $DB::single=2;   # remember debug breakpoint
 
-$gVersion = 0.60000;
+$gVersion = 0.62000;
 $gWin = (-e "C:/") ? 1 : 0;       # determine Windows versus Linux/Unix for detail settings
 
 ## Todos
@@ -71,6 +71,14 @@ my $start_date = "";
 my $start_time = "";
 my $local_diff = -1;
 my $system_name = "";
+
+my $this_ihostname = "";
+my $this_installer = "";
+my $this_gskit64 = "";
+my $this_gskit32 = "";
+
+my $phdri = -1;
+my @phdr = [],
 
 # This is a typical log scraping program. The log data looks like this
 #
@@ -543,17 +551,21 @@ if ($logfn eq "") {
    @results = ();
    $results[0] = $opt_inv if $opt_inv ne "";
    if ($opt_pc ne "") {
-      $pattern = "_ms(_kdsmain)?\.inv";
-   #   $pattern = "_" . $opt_pc . "_k" . $opt_pc . "agent\.inv" if $opt_pc ne "";
-      $pattern = "_k" . $opt_pc . "agent\.inv" if $opt_pc ne "";
-      $pattern = "_" . $opt_pc . "_k" . $opt_pc . "cma\.inv" if $opt_pc eq "nt";
-   #  $pattern = "_" . $opt_pc . "_" . $opt_pc . "_.*\.inv" if $opt_pc eq "mq";
-      $pattern = "_" . $opt_pc . "_.*\.inv" if $opt_pc eq "mq";
-      $pattern = "_" . $opt_pc . "_.*\.inv" if $opt_pc eq "ms";
+      $pattern = "_ms(_kdsmain)?\\.inv";
+      $pattern = "_k" . $opt_pc . "agent\\.inv" if $opt_pc ne "";
+      $pattern = "_" . $opt_pc . "_k" . $opt_pc . "cma\\.inv" if $opt_pc eq "nt";
+      $pattern = "_" . $opt_pc . "_.*\\.inv" if $opt_pc eq "mq";
+      $pattern = "_" . $opt_pc . "_.*\\.inv" if $opt_pc eq "ms";
       opendir(DIR,$opt_logpath) || die("cannot opendir $opt_logpath: $!\n"); # get list of files
       @results = grep {/$pattern/} readdir(DIR);
       closedir(DIR);
-      die "No _*.inv found\n" if $#results == -1;
+      if ($#results == -1) {
+         $pattern = "_" . $opt_pc . "\\.inv";
+         opendir(DIR,$opt_logpath) || die("cannot opendir $opt_logpath: $!\n"); # get list of files
+         @results = grep {/$pattern/} readdir(DIR);
+         closedir(DIR);
+         die "No _*.inv found\n" if $#results == -1;
+      }
    }
    $logfn =  $results[0];
    if ($#results > 0) {         # more than one inv file - determine which one has most recent date
@@ -630,6 +642,111 @@ if ($env_eph > 0) {
 if ($env_excl > 0) {
    if ($env_excl != $env_ct) {
       $excl_err = "Conflicting Anonymous/Exclusive binds";
+   }
+}
+
+# new report of cinfo.info if it can be located
+
+my $cinfopath;
+my $cinfofn;
+my $gotcin = 0;
+$cinfopath = $opt_logpath;
+if ( -e $cinfopath . "cinfo.info") {
+   $gotcin = 1;
+   $cinfopath = $opt_logpath;
+} elsif ( -e $cinfopath . "../cinfo.info") {
+   $gotcin = 1;
+   $cinfopath = $opt_logpath . "../";
+} elsif ( -e $cinfopath . "../../cinfo.info") {
+   $gotcin = 1;
+   $cinfopath = $opt_logpath . "../../";
+}
+$cinfopath = '"' . $cinfopath . '"';
+if ($gotcin == 1) {
+   if ($gWin == 1) {
+      $pwd = `cd`;
+      chomp($pwd);
+      $cinfopath = `cd $cinfopath & cd`;
+   } else {
+      $pwd = `pwd`;
+      chomp($pwd);
+      $cinfopath = `(cd $cinfopath && pwd)`;
+   }
+   chomp $cinfopath;
+
+   $cinfofn = $cinfopath . "/cinfo.info";
+   $cinfofn =~ s/\\/\//g;    # switch to forward slashes, less confusing when programming both environments
+
+   chomp($cinfofn);
+   chdir $pwd;
+
+   # Linux/Unix Example
+   #*********** Tue Nov 12 19:19:28 BRT 2019 ******************
+   #User: root Groups: root wheel
+   #Host name : brlpx3603	 Installer Lvl:06.30.07.06
+   #CandleHome: /IBM/ITM
+   #Version Format: VV.RM.FF.II (V: Version; R: Release; M: Modification; F: Fix; I: Interim Fix)
+   #***********************************************************
+
+   # Windows Example
+   #************ Friday, March 06, 2020 08:10:45 AM *************
+   #User       : ukc                   Group     : NA
+   #Host Name  : PSC-T-TIV01           Installer : Ver: 063007000
+   #CandleHome : D:\IBM\ITM
+   #Installitm : D:\IBM\ITM\InstallITM
+   #*************************************************************
+   open CINFO,"< $cinfofn" or warn " open cinfo.info file $cinfofn -  $!";
+   my @cin = <CINFO>;
+   close CINFO;
+   $l = 0;
+   my $d1 = "";
+   my $d2 = "";
+   foreach my $oneline (@cin) {
+      $l++;
+      chomp($oneline);
+      if ($this_ihostname eq "") {
+         $oneline =~ /Host name :.*?(\S+).*?Installer Lvl:([0-9\.]*)/ if index($oneline,"Host name") != -1;
+         $oneline =~ /Host Name\s*:\s*(\S+)\s*Installer : Ver:\s*([0-9\.]*)/ if index($oneline,"Host Name") != -1;
+         $this_ihostname = $1 if defined $1;
+         $this_installer = $2 if defined $2;
+         if ($this_ihostname ne "") {
+            $phdri++;$phdr[$phdri] = "hostname: $this_ihostname";
+            $phdri++;$phdr[$phdri] = "Installer: $this_installer";
+         }
+
+      # gs   IBM GSKit Security Interface                              li6243  08.00.50.36   d5313a          -               0
+      # gs   IBM GSKit Security Interface                              lx8266  08.00.50.69   d6276a          -               0
+      } elsif (substr($oneline,0,2) eq "gs") {
+         $oneline =~/(3|6)\ .*(\d{2}\.\d{2}\.\d{2}\.\d{2})/;
+         my $ibit = $1;
+         my $iver = $2;
+         if (defined $2) {
+            if ($ibit == 3) {
+               $this_gskit32 = $iver;
+               $phdri++;$phdr[$phdri] = "GSKIT32: $this_gskit32";
+            } else {
+               $this_gskit64 = $iver;
+               $phdri++;$phdr[$phdri] = "GSKIT64: $this_gskit64";
+            }
+            last if ($this_gskit32 ne "") and ($this_gskit64 ne "")
+         }
+      # "GS","KGS(64-bit) GSK/IBM GSKit Security Interface","WIX64","080050690","d6276a","KGS64GSK.ver","0"
+      # "GS","KGS(32-bit) GSK/IBM GSKit Security Interface","WINNT","080050690","d6276a","KGSWIGSK.ver","0"
+      } elsif (substr($oneline,0,2) eq "\"GS\"") {
+         $oneline =~  /(WIX64|WINNT)\"\,\"(\d{9})\"/;
+         my $ibit = $1;
+         my $iver = $2;
+         if (defined $2) {
+            if ($ibit == "WINNT") {
+               $this_gskit32 = $iver;
+               $phdri++;$phdr[$phdri] = "GSKIT32: $this_gskit32";
+            } else {
+               $this_gskit64 = $iver;
+               $phdri++;$phdr[$phdri] = "GSKIT64: $this_gskit64";
+            }
+         }
+         last if ($this_gskit32 ne "") and ($this_gskit64 ne "")
+      }
    }
 }
 
@@ -1139,11 +1256,11 @@ sub do_rpt {
             my $val = $2;
             if (!defined $envx{$ienv}) {
                if (($opt_allenv == 1) or (defined $commenvx{$ienv})) {
-                  $envx{$ienv} = 1;
+                  $envx{$ienv} = $val;
                   set_timeline($logtime,$l,$logtimehex,0,"EnvironmentVariables",substr($rest,1));
                }
                $kdc_families_ct += 1 if $ienv eq "KDC_FAMILIES";
-               $kde_transport_ct += 1 if ($ienv eq "KDE_TRANSPORT") and (substr($val,0,12) ne "KDC_FAMILIES");
+               $kde_transport_ct += 1 if ($ienv eq "KDE_TRANSPORT") and (substr($val,0,12) eq "KDC_FAMILIES");
                $kdc_partition_ct = 1 if ($ienv eq "KDC_PARTITION") and ($val ne '""');
                $this_hostname = $2 if $1 eq "CTIRA_HOSTNAME";
                $this_system_name = $2 if $1 eq "CTIRA_SYSTEM_NAME";
@@ -1327,12 +1444,23 @@ sub do_rpt {
       $advimpact[$advi] = $advcx{$advcode[$advi]};
       $advsit[$advi] = "COMM";
    }
+   my $idupl = 0;
+   if ($kdc_families_ct == 1) {
+      if ($kde_transport_ct == 1) {
+         my $ikdc = $envx{"KDC_FAMILIES"};
+         my $ikde = $envx{"KDE_TRANSPORT"};
+         my $ikdce = "KDC_FAMILIES=" . $ikdc;
+         my $idupl = ($ikde eq $ikdce);
+      }
+   }
 
    if (($kdc_families_ct + $kde_transport_ct) > 1) {
-      $advi++;$advonline[$advi] = "Invalid communication controls - both KDC_FAMILIES and KDE_TRANSPORT are present";
-      $advcode[$advi] = "COMMAUDIT1007E";
-      $advimpact[$advi] = $advcx{$advcode[$advi]};
-      $advsit[$advi] = "COMM";
+      if ($idupl == 0) {
+         $advi++;$advonline[$advi] = "Invalid communication controls - both KDC_FAMILIES and KDE_TRANSPORT are present";
+         $advcode[$advi] = "COMMAUDIT1007E";
+         $advimpact[$advi] = $advcx{$advcode[$advi]};
+         $advsit[$advi] = "COMM";
+      }
    }
 
    if ($kdc_partition_ct == 1) {
@@ -1596,6 +1724,9 @@ sub do_rpt {
       for (my $i=0; $i<=$hdri; $i++) {
          print OH $hdr[$i] . "\n";
       }
+      for (my $i=0; $i<=$phdri; $i++) {
+         print OH $phdr[$i] . "\n";
+      }
    }
    print OH "\n";
 
@@ -1847,6 +1978,8 @@ exit;
 # 0.58000 - Add in ENV checking if the files are present
 # 0.59000 - Add in KDC_PARTITION checking - rare and usually an error
 # 0.60000 - Add advisory for different CTIRA_HOSTNAME and CTIRA_SYSTEM_NAME
+# 0.61000 - Add hostname/installer/gskit_level when cinfo.info is available
+# 0.62000 - Make KDE_TRANSPORT/KDC_FAMILIES check work on Windows
 __END__
 
 COMMAUDIT1001W
