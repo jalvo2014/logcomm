@@ -16,7 +16,7 @@
 #
 # $DB::single=2;   # remember debug breakpoint
 
-$gVersion = 0.62000;
+$gVersion = 0.63000;
 $gWin = (-e "C:/") ? 1 : 0;       # determine Windows versus Linux/Unix for detail settings
 
 ## Todos
@@ -146,6 +146,10 @@ my $opt_z;
 my $opt_zop;
 my $opt_logpath;
 my $full_logfn;
+my $clog;
+my $logfn;
+my $logbase;
+my $loginstance;
 my $opt_v;
 my $opt_vv;
 my $opt_cmdall;                                  # show all commands
@@ -153,9 +157,19 @@ my $opt_cmdall;                                  # show all commands
 my %cmslx;
 my %kdcx;
 
+my %pcinstx = (
+                 "lo" => 1,
+              );
+
 sub gettime;                             # get time
 sub sec2ltime;
 sub do_rpt;
+sub do_instances;
+sub do_single;
+
+sub open_kib;
+sub close_kib;
+sub read_kib;
 
 
 # allow user to set impact
@@ -360,6 +374,7 @@ my %commenvx = (
                  'CTIRA_NODETYPE' => 1,
                  'CTIRA_SYSTEM_NAME' => 1,
                  'KDC_PARTITION' => 1,
+                 'KDCB0_HOSTNAME' => 1,
               );
 
 my $kdc_families_ct = 0;
@@ -387,6 +402,8 @@ my %timelinex;
 my $timeline_start;
 my %timelinexx;
 my %envx;
+my %environx;
+my $environ_ref;
 my %rpcrunx;
 my @dlogfiles;
 my @seg = ();
@@ -412,6 +429,7 @@ my $opt_tsit;                                # when defined debug testing sit
 my $opt_slot;                                # when defined specify history slots, default 60 minutes
 my $opt_pc;
 my $opt_inv;
+my $opt_instance;                            # when process instanced logs
 my $opt_allenv;                              # when 1 dump all environment variables
 my $opt_allinv;                              # when 1 dump all environment variables
 my $opt_merge;
@@ -429,6 +447,9 @@ while (@ARGV) {
    } elsif ($ARGV[0] eq "-cmdall") {
       $opt_cmdall = 1;
       shift(@ARGV);
+   } elsif ($ARGV[0] eq "-instance") {
+      $opt_instance = 1;
+      shift(@ARGV);
    } elsif ($ARGV[0] eq "-nohdr") {
       $opt_nohdr = 1;
       shift(@ARGV);
@@ -443,6 +464,7 @@ while (@ARGV) {
       shift(@ARGV);
       $opt_pc = shift(@ARGV);
       die "Option -pc with no product code set" if !defined $opt_pc;
+      $opt_pc = lc $opt_pc;
    } elsif ($ARGV[0] eq "-inv") {
       shift(@ARGV);
       $opt_inv = shift(@ARGV);
@@ -494,6 +516,7 @@ if (!defined $logfn) {$logfn = "";}
 if (!defined $opt_z) {$opt_z = 0;}
 if (!defined $opt_zop) {$opt_zop = ""}
 if (!defined $opt_cmdall) {$opt_cmdall = 0;}
+if (!defined $opt_instance) {$opt_instance = 0;}
 if (!defined $opt_nohdr) {$opt_nohdr = 0;}
 if (!defined $opt_objid) {$opt_objid = 0;}
 if (!defined $opt_tsit) {$opt_tsit = "ZZZZZZZZZ";}
@@ -507,6 +530,7 @@ if (!defined $opt_vv) {$opt_vv = 0;}
 if (!defined $opt_pc) {$opt_pc = "";}
 if (!defined $opt_inv) {$opt_inv = "";}
 $opt_merge = $opt_allinv;
+$opt_instance = 1 if defined $pcinstx{$opt_pc}; # instanced agents have one inv per instance
 
 open( ZOP, ">$opt_zop" ) or die "Cannot open zop file $opt_zop : $!" if $opt_zop ne "";
 
@@ -532,6 +556,8 @@ if ($gWin == 1) {
    chdir $pwd;
 }
 
+my %instx = ();
+
 
 $opt_logpath .= '/';
 $opt_logpath =~ s/\\/\//g;    # switch to forward slashes, less confusing when programming both environments
@@ -543,7 +569,6 @@ die "logpath or logfn must be supplied\n" if !defined $logfn and !defined $opt_l
 my $pattern;
 my @results = ();
 my $inline;
-my $logbase;
 my %todo = ();     # associative array of names and first identified timestamp
 my $skipzero = 0;
 
@@ -557,91 +582,49 @@ if ($logfn eq "") {
       $pattern = "_" . $opt_pc . "_.*\\.inv" if $opt_pc eq "mq";
       $pattern = "_" . $opt_pc . "_.*\\.inv" if $opt_pc eq "ms";
       opendir(DIR,$opt_logpath) || die("cannot opendir $opt_logpath: $!\n"); # get list of files
-      @results = grep {/$pattern/} readdir(DIR);
+      @results = grep {/$pattern/i} readdir(DIR);
       closedir(DIR);
       if ($#results == -1) {
          $pattern = "_" . $opt_pc . "\\.inv";
          opendir(DIR,$opt_logpath) || die("cannot opendir $opt_logpath: $!\n"); # get list of files
-         @results = grep {/$pattern/} readdir(DIR);
+         @results = grep {/$pattern/i} readdir(DIR);
          closedir(DIR);
          die "No _*.inv found\n" if $#results == -1;
       }
    }
-   $logfn =  $results[0];
-   if ($#results > 0) {         # more than one inv file - determine which one has most recent date
-      my $last_modify = 0;
-      $logfn =  $results[0];
-      for my $r (@results) {
+   if ($opt_instance == 1)      { # instanced agents have one inv per instance
+      for my $r (@results) {      # collect them all
          next if substr($r,-4,4) ne ".inv";
+         my $ipattern = "(.*)" . "_k" . $opt_pc . "agent\\.inv";
+         $r =~ $ipattern;
+         my $instance = $1;
          my $testpath = $opt_logpath . $r;
-         my $modify = (stat($testpath))[9];
-         if ($last_modify == 0) {
+         my %instanceref = (
+                              rline => "",           # reference files
+                              bline => "",           # base filename
+                              instance => $instance, # instance
+                           );
+         $instx{$r} = \%instanceref;
+      }
+   } else {
+      $logfn =  $results[0];
+      if ($#results > 0) {         # more than one inv file - determine which one has most recent date
+         my $last_modify = 0;
+         $logfn =  $results[0];
+         for my $r (@results) {
+            next if substr($r,-4,4) ne ".inv";
+            my $testpath = $opt_logpath . $r;
+            my $modify = (stat($testpath))[9];
+            if ($last_modify == 0) {
+               $logfn = $r;
+               $last_modify = $modify;
+               next;
+            }
+            next if $modify < $last_modify;
             $logfn = $r;
             $last_modify = $modify;
-            next;
-         }
-         next if $modify < $last_modify;
-         $logfn = $r;
-         $last_modify = $modify;
-      }
-   }
-}
-
-
-$pattern = '(\S+)\.env$';
-@results = ();
-opendir(ENVD,$opt_logpath) || die("cannot opendir $opt_logpath: $!\n"); # get list of files
-@results = grep {/$pattern/} readdir(ENVD);
-closedir(ENVD);
-my $env_ct;
-my @envlines;
-my $env_eph = 0;
-my $env_anon = 0;
-my $env_excl = 0;
-my $excl_err = "";
-my $eph_err = "";
-my $do_env = 1;
-if ($#results != -1) {
-   $env_ct = $#results + 1;
-   foreach my $f (@results) {
-      my $full_envfn = $opt_logpath . $f;
-      open(ENV,"< $full_envfn") || die("Could not open inv  $full_envfn\n");
-      my @envl = <ENV>;
-      close(ENV);
-      my $l = 0;
-      die "empty ENV file $full_envfn\n" if $#envl == -1;
-      foreach my $inline (@envl) {
-         $l += 1;
-         chop($inline);
-         if (index($inline,"KDC_FAMILIES=") != -1) {
-            my @envdet = ["EPH",$f,$l,$inline];
-            push @envlines,\@envdet;
-            $kdcx{$inline} = 1;
-            $env_eph += 1 if index($inline,"EPHEMERAL:Y") != -1;
-         } elsif (index($inline,"KDEB_INTERFACELIST=") != -1){
-            $env_excl += 1 if index($inline,"KDEB_INTERFACELIST=!") != -1;
-            my @envdet = ["EXCL",$f,$l,$inline];
-            push @envlines,\@envdet;
-         } elsif (index($inline,"KDCB0_HOSTNAME=") != -1){
-            my @envdet = ["EXCL",$f,$l,$inline];
-            push @envlines,\@envdet;
-         } elsif (index($inline,"CT_CMSLIST=") != -1){
-            my @envdet = ["CMSL",$f,$l,$inline];
-            push @envlines,\@envdet;
-            $cmslx{$inline} = 1;
          }
       }
-   }
-}
-
-if ($env_eph > 0) {
-   if ($env_eph != $env_ct) {
-      $eph_err = "Conflicting EPHEMERAL:Y Configuration";
-   }
-}
-if ($env_excl > 0) {
-   if ($env_excl != $env_ct) {
-      $excl_err = "Conflicting Anonymous/Exclusive binds";
    }
 }
 
@@ -751,67 +734,199 @@ if ($gotcin == 1) {
 }
 
 
-my %logbasex;
-$full_logfn = $opt_logpath . $logfn;
-if ($logfn =~ /.*\.inv$/) {
-   open(INV, "< $full_logfn") || die("Could not open inv  $full_logfn\n");
-   my @inv = <INV>;
-   close(INV);
-   my $l = 0;
-   die "empty INV file $full_logfn\n" if $#inv == -1;
-   foreach my $inline (@inv) {
-      $inline =~ s/\\/\//g;    # switch to forward slashes, less confusing when programming both environments
-      $pos = rindex($inline,'/');
-      $inline = substr($inline,$pos+1);
-      $inline =~ m/(.*)-\d\d\.log$/;
-      $inline =~ m/(.*)-\d\.log$/ if !defined $1;
-      die "invalid log form $inline from $full_logfn line $l\n" if !defined $1;
-      $logbase = $1;
-      $logfn = $1 . '-*.log';
-      $logbasex{$logbase} = 1;
-      last if $opt_allinv == 0;
+
+$pattern = '(\S+)\.env$';
+@results = ();
+opendir(ENVD,$opt_logpath) || die("cannot opendir $opt_logpath: $!\n"); # get list of files
+@results = grep {/$pattern/i} readdir(ENVD);
+closedir(ENVD);
+my $env_ct;
+my @envlines;
+my $env_eph = 0;
+my $env_anon = 0;
+my $env_excl = 0;
+my $excl_err = "";
+my $eph_err = "";
+my $do_env = 1;
+if ($#results != -1) {
+   $env_ct = $#results + 1;
+   foreach my $f (@results) {
+      my $full_envfn = $opt_logpath . $f;
+      open(ENV,"< $full_envfn") || die("Could not open inv  $full_envfn\n");
+      my @envl = <ENV>;
+      close(ENV);
+      my $l = 0;
+      die "empty ENV file $full_envfn\n" if $#envl == -1;
+      foreach my $inline (@envl) {
+         $l += 1;
+         chop($inline);
+         if (index($inline,"KDC_FAMILIES=") != -1) {
+            my @envdet = ["EPH",$f,$l,$inline];
+            push @envlines,\@envdet;
+            $kdcx{$inline} = 1;
+            $env_eph += 1 if index($inline,"EPHEMERAL:Y") != -1;
+         } elsif (index($inline,"KDEB_INTERFACELIST=") != -1){
+            $env_excl += 1 if index($inline,"KDEB_INTERFACELIST=!") != -1;
+            my @envdet = ["EXCL",$f,$l,$inline];
+            push @envlines,\@envdet;
+         } elsif (index($inline,"KDEB_INTERFACELIST_IPV6=") != -1){
+            $env_excl += 1 if index($inline,"KDEB_INTERFACELIST_IPV6=!") != -1;
+            my @envdet = ["EXCL",$f,$l,$inline];
+            push @envlines,\@envdet;
+         } elsif (index($inline,"KDCB0_HOSTNAME=") != -1){
+            my @envdet = ["EXCL",$f,$l,$inline];
+            push @envlines,\@envdet;
+         } elsif (index($inline,"CT_CMSLIST=") != -1){
+            my @envdet = ["CMSL",$f,$l,$inline];
+            push @envlines,\@envdet;
+            $cmslx{$inline} = 1;
+         }
+      }
    }
 }
 
 
-my $base_ct = scalar keys %logbasex;
-if ($base_ct == 0) {
-   $logbasex{$logfn} = 1;
-}
-
-#if (!defined $logbase) {
-#  $logbasex{$logfn} = 1 if ! -e $logfn;
-#   $logbasex{$logfn} = 1;
-#}
-
-sub open_kib;
-sub close_kib;
-sub read_kib;
-
-my $ll = 0;
-foreach my $log (keys %logbasex) {
-   $ll += 1;
-   $logbase = $log;
-   do_rpt;
-}
-
-if ($opt_merge == 1) {
-   my $mfn = "merge.csv";
-   open MH, ">$mfn" or die "can't open $mfn: $!";
-   foreach $f ( sort { $a cmp $b} keys %timelinexx) {
-      my $ml_ref = $timelinexx{$f};
-      $outl = sec2ltime($ml_ref->{time}+$local_diff) . ",";
-      $outl .= $ml_ref->{hextime} . ",";
-      $outl .= $ml_ref->{l} . ",";
-      $outl .= $ml_ref->{advisory} . ",";
-      $outl .= $ml_ref->{notes} . ",";
-      $outl .= $ml_ref->{logbase} . ",";
-      print MH "$outl\n";
+####################
+if ($env_eph > 0) {
+   if ($env_eph != $env_ct) {
+      $eph_err = "Conflicting EPHEMERAL:Y Configuration";
    }
-   close MH;
 }
+if ($env_excl > 0) {
+   if ($env_excl != $env_ct) {
+      $excl_err = "Conflicting Anonymous/Exclusive binds";
+   }
+}
+
+if ($opt_instance == 1) {
+   do_instances();
+
+   $ofn = "logcomm" . "_" . $opt_pc . ".csv";
+   open OH, ">$ofn" or die "can't open $ofn: $!";
+   print OH "Instance Environment Variable Summary\n";
+   print OH "Variable,Instance_ct,Value_ct,Values\n";
+   print OH ",File,Line,LogLine,\n";
+   foreach my $e (keys %environx) {
+      if (($opt_allenv == 1) or (defined $commenvx{$e})) {
+         my $environ_ref = $environx{$e};
+         $oline = $e . ",";
+         $ict = scalar keys %{$environ_ref->{sources}};
+         $oline .= $ict . ",";
+         $ict = scalar keys %{$environ_ref->{vals}};
+         $oline .= $ict . ",";
+         my $pvals = "";
+         foreach $g (keys %{$environ_ref->{vals}}) {
+            $pvals .= $g . "[" . $environ_ref->{vals}{$g} . "] ";
+         }
+         chop $pvals if $pvals ne "";
+         $oline .= $pvals . ",";
+         print OH "$oline\n";
+         foreach my $s (keys %{$environ_ref->{sources}}) {
+            my $source_ref = $environ_ref->{sources}{$s};
+            $oline = "," . $s . ",";
+            $oline .= $source_ref->{l} . ",";
+            $oline .= $source_ref->{line} . ",";
+            print OH "$oline\n";
+         }
+      }
+   }
+
+   close OH;
+
+} else {
+   do_single();
+}
+
 
 exit 0;
+
+sub do_instances {
+   foreach my $r (keys %instx) {
+      $instance_ref = $instx{$r};
+      $full_logfn = $opt_logpath . $r;
+      if ($r =~ /.*\.inv$/) {
+         open(INV, "< $full_logfn") || die("Could not open inv  $full_logfn\n");
+         my @inv = <INV>;
+         close(INV);
+         my $l = 0;
+         die "empty INV file $full_logfn\n" if $#inv == -1;
+         foreach my $inline (@inv) {
+            $inline =~ s/\\/\//g;    # switch to forward slashes, less confusing when programming both environments
+            $pos = rindex($inline,'/');
+            $inline = substr($inline,$pos+1);
+            $inline =~ m/(.*)-\d\d\.log$/;
+            $inline =~ m/(.*)-\d\.log$/ if !defined $1;
+            die "invalid log form $inline from $full_logfn line $l\n" if !defined $1;
+            $logbase = $1;
+            $logfn = $1 . '-*.log';
+            $instance_ref->{rline} = $logfn;
+            $instance_ref->{bline} = $logbase;
+            last;
+#           last if $opt_allinv == 0;
+         }
+      }
+      $logbase = $instance_ref->{bline};
+      $logfn   = $instance_ref->{rline};
+      $loginstance = $instance_ref->{instance};
+      print STDERR $opt_pc . " " . $loginstance . "\n";
+      do_rpt;
+   }
+}
+
+
+sub do_single {
+   my %logbasex;
+   $full_logfn = $opt_logpath . $logfn;
+   if ($logfn =~ /.*\.inv$/) {
+      open(INV, "< $full_logfn") || die("Could not open inv  $full_logfn\n");
+      my @inv = <INV>;
+      close(INV);
+      my $l = 0;
+      die "empty INV file $full_logfn\n" if $#inv == -1;
+      foreach my $inline (@inv) {
+         $inline =~ s/\\/\//g;    # switch to forward slashes, less confusing when programming both environments
+         $pos = rindex($inline,'/');
+         $inline = substr($inline,$pos+1);
+         $inline =~ m/(.*)-\d\d\.log$/;
+         $inline =~ m/(.*)-\d\.log$/ if !defined $1;
+         die "invalid log form $inline from $full_logfn line $l\n" if !defined $1;
+         $logbase = $1;
+         $logfn = $1 . '-*.log';
+         $logbasex{$logbase} = 1;
+         last if $opt_allinv == 0;
+      }
+   }
+
+
+   my $base_ct = scalar keys %logbasex;
+   if ($base_ct == 0) {
+      $logbasex{$logfn} = 1;
+   }
+
+   my $ll = 0;
+   foreach my $log (keys %logbasex) {
+      $ll += 1;
+      $logbase = $log;
+      do_rpt;
+   }
+
+   if ($opt_merge == 1) {
+      my $mfn = "merge.csv";
+      open MH, ">$mfn" or die "can't open $mfn: $!";
+      foreach $f ( sort { $a cmp $b} keys %timelinexx) {
+         my $ml_ref = $timelinexx{$f};
+         $outl = sec2ltime($ml_ref->{time}+$local_diff) . ",";
+         $outl .= $ml_ref->{hextime} . ",";
+         $outl .= $ml_ref->{l} . ",";
+         $outl .= $ml_ref->{advisory} . ",";
+         $outl .= $ml_ref->{notes} . ",";
+         $outl .= $ml_ref->{logbase} . ",";
+         print MH "$outl\n";
+      }
+      close MH;
+   }
+}
+
 
 
 sub do_rpt {
@@ -1265,6 +1380,30 @@ sub do_rpt {
                $this_hostname = $2 if $1 eq "CTIRA_HOSTNAME";
                $this_system_name = $2 if $1 eq "CTIRA_SYSTEM_NAME";
             }
+            $env_excl += 1 if index($rest,"KDEB_INTERFACELIST=!") != -1;
+            $env_excl += 1 if index($rest,"KDEB_INTERFACELIST_IPV6=!") != -1;
+            $environ_ref = $environx{$ienv};
+            if (!defined $environ_ref) {
+               my %environref = (
+                                   sources => {},
+                                   vals => {},
+                                );
+               $environ_ref = \%environref;
+               $environx{$ienv} = \%environref;
+            }
+            $environ_ref->{vals}{$val} += 1;
+            my $sourcekey = $clog;
+            my $source_ref = $environ_ref->{sources}{$sourcekey};
+            if (!defined $source_ref) {
+               my %sourceref = (
+                                   instance => $loginstance,
+                                   log => $clog,
+                                   l => $l,
+                                   line => $inline,
+                               );
+               $source_ref = \%sourceref;
+               $environ_ref->{sources}{$sourcekey} = \%sourceref;
+            }
             next;
          }
       }
@@ -1690,7 +1829,7 @@ sub do_rpt {
    if ($do_env == 1) {
       $rptkey = "COMMREPORT003";$advrptx{$rptkey} = 1;         # record report key
       $cnt++;$oline[$cnt]="\n";
-      $cnt++;$oline[$cnt]="$rptkey: System ENV report\n";
+      $cnt++;$oline[$cnt]="$rptkey: System and Diagnostic ENV report\n";
       $cnt++;$oline[$cnt]="Type,File,LineNum,Line,\n";
       foreach my $h (@envlines) {
          my @ah = @{$h};
@@ -1712,7 +1851,9 @@ sub do_rpt {
       }
    }
 
-   if ($opt_pc ne "") {
+   if ($opt_instance == 1) {
+      $opt_o = "logcomm_" . $loginstance . "_" . $opt_pc . ".csv" if $opt_o eq "logcomm.csv";
+   } elsif ($opt_pc ne "") {
       $opt_o = "logcomm_" . $opt_pc . ".csv" if $opt_o eq "logcomm.csv";
    }
    my $ofn = $opt_o;
@@ -1786,6 +1927,7 @@ sub do_rpt {
       }
    }
    close(OH);
+$opt_o = "logcomm.csv";          # trigger proper filename if re-entered on instanced agent
    close(ZOP) if $opt_zop ne "";
 }
 
@@ -1797,11 +1939,17 @@ sub open_kib {
          $seg[$segi] = $logfn;
          $segmax = 0;
    } else {
+      my $elogfiles;
+
       $logpat = $logbase . '-.*\.log' if defined $logbase;
       opendir(DIR,$opt_logpath) || die("cannot opendir $opt_logpath: $!\n");
-      @dlogfiles = grep {/$logpat/} readdir(DIR);
+      @elogfiles = readdir(DIR);
       closedir(DIR);
-      if ($#dlogfiles == -1) {
+      my @ilogfiles;
+      foreach my $f (@elogfiles) {
+         push @ilogfiles,$f if $f =~ /$logpat/i;
+      }
+      if ($#ilogfiles == -1) {
          warn "no log files found with given specifcation $logpat\n";
          return 1;
       }
@@ -1813,11 +1961,12 @@ sub open_kib {
       my $tgot;          # track if timestamp found
       my $itime;
 
-      foreach $f (@dlogfiles) {
+      foreach $f (@ilogfiles) {
          $f =~ /^.*-(\d+)\.log/;
          $segmax = $1 if $segmax == 0;
          $segmax = $1 if $segmax < $1;
          $dlog = $opt_logpath . $f;
+         $clog = $f;
          open($dh, "< $dlog") || die("Could not open log $dlog\n");
          for ($t=0;$t<$tlimit;$t++) {
             $oneline = <$dh>;                      # read one line
@@ -1980,6 +2129,7 @@ exit;
 # 0.60000 - Add advisory for different CTIRA_HOSTNAME and CTIRA_SYSTEM_NAME
 # 0.61000 - Add hostname/installer/gskit_level when cinfo.info is available
 # 0.62000 - Make KDE_TRANSPORT/KDC_FAMILIES check work on Windows
+# 0.63000 - Handle instanced logs
 __END__
 
 COMMAUDIT1001W
