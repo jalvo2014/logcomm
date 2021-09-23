@@ -16,7 +16,7 @@
 #
 # $DB::single=2;   # remember debug breakpoint
 
-$gVersion = 0.63000;
+$gVersion = 0.66000;
 $gWin = (-e "C:/") ? 1 : 0;       # determine Windows versus Linux/Unix for detail settings
 
 ## Todos
@@ -76,6 +76,16 @@ my $this_ihostname = "";
 my $this_installer = "";
 my $this_gskit64 = "";
 my $this_gskit32 = "";
+
+my %statex;
+my $statei = 0;
+
+my $isdaproduct;
+my $isdatems;
+my $isdavrmf;
+my $isdafail = 0;
+
+my %owngroupx;
 
 my $phdri = -1;
 my @phdr = [],
@@ -187,6 +197,9 @@ my %advcx = (
               "COMMAUDIT1011W" => "95",
               "COMMAUDIT1012W" => "95",
               "COMMAUDIT1013W" => "90",
+              "COMMAUDIT1014E" => "100",
+              "COMMAUDIT1015W" => "80",
+              "COMMAUDIT1016E" => "100",
             );
 
 my $advi = -1;
@@ -556,6 +569,342 @@ if ($gWin == 1) {
    chdir $pwd;
 }
 
+# new report of netstat.info if it can be located
+
+my $netstatpath;
+my $netstatfn;
+my $gotnet = 0;
+$netstatpath = $opt_logpath;
+if ( -e $netstatpath . "netstat.info") {
+   $gotnet = 1;
+   $netstatpath = $opt_logpath;
+} elsif ( -e $netstatpath . "../netstat.info") {
+   $gotnet = 1;
+   $netstatpath = $opt_logpath . "../";
+} elsif ( -e $netstatpath . "../../netstat.info") {
+   $gotnet = 1;
+   $netstatpath = $opt_logpath . "../../";
+}
+$netstatpath = '"' . $netstatpath . '"';
+
+if ($gotnet == 1) {
+   if ($gWin == 1) {
+      $pwd = `cd`;
+      chomp($pwd);
+      $netstatpath = `cd $netstatpath & cd`;
+   } else {
+      $pwd = `pwd`;
+      chomp($pwd);
+      $netstatpath = `(cd $netstatpath && pwd)`;
+   }
+
+   chomp $netstatpath;
+
+   $netstatfn = $netstatpath . "/netstat.info";
+   $netstatfn =~ s/\\/\//g;    # switch to forward slashes, less confusing when programming both environments
+
+   chomp($netstatfn);
+   chdir $pwd;
+
+   my $active_line = "";
+   my $descr_line = "";
+   my @nzero_line;
+   my %nzero_ports = (
+                        '1918' => 1,
+                        '3660' => 1,
+                        '63358' => 1,
+                        '65100' => 1,
+                     );
+
+   my %inbound;
+   my $inbound_ref;
+   my $high_sendq = 0;
+   my $high_recvq = 0;
+   my $sendq_ct = 0;
+   my $recvq_ct = 0;
+   my $total_recvq;
+   my $total_sendq;
+
+   #   open( FILE, "< $opt_ini" ) or die "Cannot open ini file $opt_ini : $!";
+   if (defined $netstatfn) {
+      open NETS,"< $netstatfn" or warn " open netstat.info file $netstatfn -  $!";
+      my @nts = <NETS>;
+      close NETS;
+
+      # sample netstat outputs
+
+      # Active Internet connections (including servers)
+      # PCB/ADDR         Proto Recv-Q Send-Q  Local Address      Foreign Address    (state)
+      # f1000e000ca7cbb8 tcp4       0      0  *.*                   *.*                   CLOSED
+      # f1000e0000ac93b8 tcp4       0      0  *.*                   *.*                   CLOSED
+      # f1000e00003303b8 tcp4       0      0  *.*                   *.*                   CLOSED
+      # f1000e00005bcbb8 tcp        0      0  *.*                   *.*                   CLOSED
+      # f1000e00005bdbb8 tcp4       0      0  *.*                   *.*                   CLOSED
+      # f1000e00005b9bb8 tcp6       0      0  *.22                  *.*                   LISTEN
+      # ...
+      # Active UNIX domain sockets
+      # Active Internet connections (servers and established)
+      #
+      # Active Internet connections (servers and established)
+      # Proto Recv-Q Send-Q Local Address               Foreign Address             State       PID/Program name
+      # tcp        0      0 0.0.0.0:1920                0.0.0.0:*                   LISTEN      18382/klzagent
+      # tcp        0      0 0.0.0.0:34272               0.0.0.0:*                   LISTEN      18382/klzagent
+      # tcp        0      0 0.0.0.0:28002               0.0.0.0:*                   LISTEN      5955/avagent.bin
+      # ...
+      # Active UNIX domain sockets (servers and established)
+
+      # tcp        0      0 171.128.137.60:20014        0.0.0.0:*                   LISTEN      -
+      # tcp        0      0 0.0.0.0:4750                0.0.0.0:*                   LISTEN      -
+      # tcp        0      0 171.128.137.60:57290        171.128.137.71:20010        CLOSE_WAIT  -
+
+      my $l = 0;
+      my $netstat_state = 0;                 # seaching for "Active Internet connections"
+      my $recvq_pos = -1;
+      my $sendq_pos = -1;
+      foreach my $oneline (@nts) {
+         $l++;
+         chomp($oneline);
+         if ($netstat_state == 0) {           # seaching for "Active Internet connections"
+            next if substr($oneline,0,27) ne "Active Internet connections";
+            $active_line = $oneline;
+            $netstat_state = 1;
+         } elsif ($netstat_state == 1) {           # next line is column descriptor line
+            $recvq_pos = index($oneline,"Recv-Q");
+            $sendq_pos = index($oneline,"Send-Q");
+            $descr_line = $oneline;
+            $netstat_state = 2;
+         } elsif ($netstat_state == 2) {           # collect non-zero send/recv queues
+            last if index($oneline,"Active UNIX domain sockets") != -1;
+            $oneline =~ /(tcp\S*)\s*(\d+)\s*(\d+)\s*(\S+)\s*(\S+)\s*(\S+)/;
+            my $proto = $1;
+            if (defined $proto) {
+               my $recvq = $2;
+               my $sendq = $3;
+               my $localad = $4;
+               my $foreignad = $5;
+               my $istate = $6;
+               my $localport = "";
+               my $foreignport = "";
+               my $localsystem = "";
+               my $foreignsystem = "";
+               $localad =~ /(\S+)[:\.](\S+)/;
+               $localsystem = $1 if defined $1;
+               $localport = $2 if defined $2;
+               $foreignad =~ /(\S+)[:\.](\S+)/;
+               next if substr($foreignad,0,4) eq ":::*";
+               $foreignsystem = $1 if defined $1;
+               $foreignport = $2 if defined $2;
+               if ((defined $nzero_ports{$localport}) or (defined $nzero_ports{$foreignport})) {
+                  if (defined $recvq) {
+                     if (defined $sendq) {
+                        if (($recvq > 0) or ($sendq > 0)) {
+                           next if ($recvq == 0) and ($sendq == 0);
+                           push @nzero_line,$oneline;
+                           $total_sendq += 1;
+                           $total_recvq += 1;
+                           $sendq_ct += $sendq;
+                           $recvq_ct += $recvq;
+                           $max_sendq = $sendq if $sendq > $max_sendq;
+                           $max_recvq = $recvq if $recvq > $max_recvq;
+                           $high_sendq += 1 if $sendq >= 1024;
+                           $high_recvq += 1 if $recvq >= 1024;
+                        }
+                     }
+                  }
+               }
+               if (defined $nzero_ports{$localport}) {
+                  if (defined $recvq) {
+                     if (defined $sendq) {
+                        $foreignsystem =~ /(\d+)\.(\d+)\.(\d+)\.(\d+)/;
+                        my $net8 = $1;
+                        my $net16 = $2;
+                        my $net24 = $3;
+                        my $net32 = $4;
+                        if ($net8 ne "*") {
+                           my $netkey = $net8;
+                           my $netrest = $net16 . "." . $net24 . "." . $net32;
+                           my $net_ref = $net8x{$netkey};
+                           if (!defined $net_ref) {
+                              my %netref = (
+                                              recv0 => 0,
+                                              recvp => 0,
+                                              send0 => 0,
+                                              sendp => 0,
+                                              subnets => {},
+                                           );
+                              $net_ref = \%netref;
+                              $net8x{$netkey} = \%netref;
+                           }
+                           $net_ref->{recv0} += 1 if $recvq == 0;
+                           $net_ref->{recvp} += 1 if $recvq > 0;
+                           $net_ref->{send0} += 1 if $sendq == 0;
+                           $net_ref->{sendp} += 1 if $sendq > 0;
+                           $net_ref->{subnets}{$netrest} += $recvq + $sendq;
+                           $netkey = $net8 . "." . $net16;
+                           $netrest = $net24 . "." . $net32;
+                           $net_ref = $net16x{$netkey};
+                           if (!defined $net_ref) {
+                              my %netref = (
+                                              recv0 => 0,
+                                              recvp => 0,
+                                              send0 => 0,
+                                              sendp => 0,
+                                              subnets => {},
+                                           );
+                              $net_ref = \%netref;
+                              $net16x{$netkey} = \%netref;
+                           }
+                           $net_ref->{recv0} += 1 if $recvq == 0;
+                           $net_ref->{recvp} += 1 if $recvq > 0;
+                           $net_ref->{send0} += 1 if $sendq == 0;
+                           $net_ref->{sendp} += 1 if $sendq > 0;
+                           $net_ref->{subnets}{$netrest} += $recvq + $sendq;
+                           $netkey = $net8 . "." . $net16 . "." . $net24;
+                           $netrest = $net32;
+                           $net_ref = $net24x{$netkey};
+                           if (!defined $net_ref) {
+                              my %netref = (
+                                              recv0 => 0,
+                                              recvp => 0,
+                                              send0 => 0,
+                                              sendp => 0,
+                                              subnets => {},
+                                           );
+                              $net_ref = \%netref;
+                              $net24x{$netkey} = \%netref;
+                           }
+                           $net_ref->{recv0} += 1 if $recvq == 0;
+                           $net_ref->{recvp} += 1 if $recvq > 0;
+                           $net_ref->{send0} += 1 if $sendq == 0;
+                           $net_ref->{sendp} += 1 if $sendq > 0;
+                           $net_ref->{subnets}{$netrest} += $recvq + $sendq;
+                        }
+                     }
+                  }
+               }
+               if (defined $nzero_ports{$localport}) {
+                  $inbound_ref = $inbound{$localport};
+                  if (!defined $inbound_ref) {
+                     my %inboundref = (
+                                         instances => {},
+                                         count => 0,
+                                      );
+                     $inbound_ref = \%inboundref;
+                     $inbound{$localport} = \%inboundref;
+                  }
+                  $inbound_ref->{count} += 1;
+                  $inbound_ref->{instances}{$foreignsystem} += 1;
+               }
+               if (defined $istate) {
+                  if ($istate ne ""){
+                     $statex{$istate} += 1;
+                     $statei += 1;
+                  }
+               }
+            }
+         }
+      }
+   }
+}
+my $icw = $statex{"CLOSE_WAIT"};
+if (defined $icw) {
+   if ($icw > 1000) {
+      $advi++;$advonline[$advi] = "Many[$icw] CLOSE_WAIT TCP connection states of $statei connections";
+      $advcode[$advi] = "COMMAUDIT1015W";
+      $advimpact[$advi] = $advcx{$advcode[$advi]};
+      $advsit[$advi] = "TCP";
+   }
+}
+
+
+
+# new report of dir.info if it can be located
+
+my $dirpath;
+my $dirfn;
+my $gotdir = 0;
+my $this_candlehome = "";
+$dirpath = $opt_logpath;
+if ( -e $dirpath . "dir.info") {
+   $gotdir = 1;
+   $dirpath = $opt_logpath;
+} elsif ( -e $dirpath . "../dir.info") {
+   $gotdir = 1;
+   $dirpath = $opt_logpath . "../";
+} elsif ( -e $dirpath . "../../dir.info") {
+   $gotdir = 1;
+   $dirpath = $opt_logpath . "../../";
+}
+$dirpath = '"' . $dirpath . '"';
+if ($gotdir == 1) {
+   if ($gWin == 1) {
+      $pwd = `cd`;
+      chomp($pwd);
+      $dirpath = `cd $dirpath & cd`;
+   } else {
+      $pwd = `pwd`;
+      chomp($pwd);
+      $dirpath = `(cd $dirpath && pwd)`;
+   }
+   chomp $dirpath;
+
+   $dirfn = $dirpath . "/dir.info";
+   $dirfn =~ s/\\/\//g;    # switch to forward slashes, less confusing when programming both environments
+
+   chomp($dirfn);
+   chdir $pwd;
+
+   # Linux/Unix Example
+   #CANDLEHOME=/IBM/ITM
+   #134552    4 drwxr-xr-x  32 root     root         4096 Sep 23  2019 /opt/IBM/ITM
+   #262434    4 drwxrwxrwx   3 root     root         4096 May 29  2015 /opt/IBM/ITM/xmlconfig
+   #262678    4 -rwxrwxrwx   1 root     root         1017 Sep 23  2019 /opt/IBM/ITM/xmlconfig/ac16_help.png
+   #57385  422 -rwxr-xr-x  1 itmagent  netcool     431450 Aug  6  2018 /opt/IBM/tivoli/ITM/aix536/ms/bin/kdsvlunx
+   #
+   # Windows Example
+   #
+   open DINFO,"< $dirfn" or warn " open dir.info file $dirfn -  $!";
+   my @din = <DINFO>;
+   close DINFO;
+   $l = 0;
+   my $d1 = "";
+   my $d2 = "";
+   foreach my $oneline (@din) {
+      $l++;
+      chomp($oneline);
+      next if $oneline eq "";
+      if ($this_candlehome eq "") {
+         $oneline =~ /CANDLEHOME=(.*)/;
+         $this_candlehome = $1 if defined $1;
+         next;
+      }
+      $oneline =~ /\d+\W+\d+\W+(\S+)\W+\d+\W+(\S+)\W+(\S+)\W+(\d+)\W+.{12}\W+(\S+)/;
+      my $iperm = $1;
+      my $iown = $2;
+      my $igroup = $3;
+      my $isize = $4;
+      my $iname = $5;
+
+      my $key = $iown . "|" . $igroup;
+      $owngroupx{$key} += 1;
+   }
+   if ($this_ihostname ne "") {
+      $phdri++;$phdr[$phdri] = "candlehome: $this_candlehome";
+   }
+   my $og_ct = scalar keys %owngroupx;
+   if ($og_ct > 1) {
+      my $pog = "";
+      foreach $g ( sort {$a cmp $b} keys %owngroupx) {
+         $pog .= $g . "[" . $owngroupx{$g} . "] ";
+      }
+      chop($pog) if $pog ne "";
+      $advi++;$advonline[$advi] = "Multiple Owner/Group file instances[$og_ct] $pog";
+      $advcode[$advi] = "COMMAUDIT1014E";
+      $advimpact[$advi] = $advcx{$advcode[$advi]};
+      $advsit[$advi] = "FILE";
+   }
+}
+
 my %instx = ();
 
 
@@ -627,6 +976,7 @@ if ($logfn eq "") {
       }
    }
 }
+
 
 # new report of cinfo.info if it can be located
 
@@ -955,7 +1305,6 @@ sub do_rpt {
    $kdc_partition_ct = 0;
    $anic_ct = 0;
    $itc_ct = 0;
-   $advi = -1;
 
    $hdri++;$hdr[$hdri] = "Agent Communications Audit report v$gVersion";
    my $audit_start_time = gettime();       # formated current time for report
@@ -1408,11 +1757,19 @@ sub do_rpt {
          }
       }
       #(5AA2E3F5.0008-13E0:kraaulog.cpp,755,"IRA_OutputLogMsg") Connecting to CMS REMOTE_usrdrtm051ccpr2
+      #(6138E582.00B5-2F:kraaulog.cpp,699,"IRA_OutputLogMsg") Self-Describing Agent Register/Install failed with STATUS (1024/SDA Install Blocked) for PRODUCT "SY", with TEMS "HUBTEMS", VERSION_INFO "product_vrmf=06300708;tms_package_vrmf=06300708;tps_package_vrmf=06300708;tpw_package_vrmf=06300708;".
       if (substr($logunit,0,12) eq "kraaulog.cpp") {
          if ($logentry eq "IRA_OutputLogMsg") {
             $oneline =~ /^\((\S+)\)(.+)$/;
             $rest = $2; #  Connecting to CMS REMOTE_usrdrtm051ccpr2
             set_timeline($logtime,$l,$logtimehex,0,"OPLOG",substr($rest,1));
+            if (substr($rest,1,45) eq "Self-Describing Agent Register/Install failed") {
+               $rest =~ /PRODUCT \"(\S+)\".*TEMS \"(\S+)\".*product_vrmf=(\d+)/;
+               $isdaproduct = $1;
+               $isdatems = $2;
+               $isdavrmf = $3;
+               $isdafail = 1;   # SDA failure
+            }
             next;
          }
       }
@@ -1636,6 +1993,12 @@ sub do_rpt {
       $advcode[$advi] = "COMMAUDIT1012W";
       $advimpact[$advi] = $advcx{$advcode[$advi]};
       $advsit[$advi] = "TEMA";
+   }
+   if ($isdafail == 1) {
+      $advi++;$advonline[$advi] = "SDA Failure Product[$isdaproduct] TEMS[$isdatems] VRMF[$isdavrmf]";
+      $advcode[$advi] = "COMMAUDIT1016E";
+      $advimpact[$advi] = $advcx{$advcode[$advi]};
+      $advsit[$advi] = "TEMS";
    }
    if (defined $this_hostname) {
       if (defined $this_system_name) {
@@ -1938,6 +2301,7 @@ sub open_kib {
          $segi += 1;
          $seg[$segi] = $logfn;
          $segmax = 0;
+         $clog = $logfn;
    } else {
       my $elogfiles;
 
@@ -2130,6 +2494,9 @@ exit;
 # 0.61000 - Add hostname/installer/gskit_level when cinfo.info is available
 # 0.62000 - Make KDE_TRANSPORT/KDC_FAMILIES check work on Windows
 # 0.63000 - Handle instanced logs
+# 0.64000 - Add advisory for Linux/Unix different owner/group files
+# 0.65000 - Add advisory too many CLOSE_WAIT connections
+# 0.66000 - Add advisory on SDA install failure
 __END__
 
 COMMAUDIT1001W
@@ -2380,6 +2747,90 @@ slow diagnosis time.
 
 Recovery plan: Review the agent configuration and make sure that
 CTIRA_HOSTNAME and CTIRA_SYSTEM_NAME are the same.
+--------------------------------------------------------------
+
+COMMAUDIT1014E
+Text: Multiple Owner/Group file instances[count] list[count] ...
+
+Tracing: error
+
+Meaning: If present, the dir.info is scanned. A normal install
+on Linux/Unix will use the same owner and group for all files.
+This records the case when they are different.
+
+Recovery plan: Change the owner/group files so they are indentical
+within the installation directory.
+--------------------------------------------------------------
+
+COMMAUDIT1015W
+Text: Many[count] CLOSE_WAIT TCP connection states of count connections
+
+Tracing: netstat.info file from pdcollect
+
+Meaning: This comes from a case where an enormous number of
+CLOSE_WAIT state connections had built up....
+
+TCP,Many[56435] CLOSE_WAIT TCP connection states of 56667 connections
+
+as a result, an ITM agent could not get temporary/ephemeral ports
+and failed to connnect to the TEMS. These CLOSE_WAIT connections were from
+an unrelated product.
+
+[A TCP expert will cring at the following simplification of a complex logic.]
+
+These CLOSE_WAIT state connections are normal. When a TCP socket connection
+is closed, the TCP system places it in CLOSE_WAIT status for 120 seconds [default].
+The goal is so make it easier to handle late arriving/duplicate/fragmented packets.
+
+It is possible to change that 120 second timeout, which was after all defined
+in the early days of TCP in 1981.
+
+Recovery plan: Investigate and change the server process leaving so many
+CLOSE_WAIT connections. Or run that server on another system.
+--------------------------------------------------------------
+
+COMMAUDIT1016E
+Text: SDA Failure Product[productcode] TEMS[tems] VRMF[maintlevel]
+
+Tracing: error
+
+Meaning: The agent is attempting to register a maintenance level
+using SDA or Self Describing Agent logic. The TEMS only allows
+certained defined maintenance levels and this one is not permitted.
+
+Recovery plan example:
+1) First log into the TEMS
+    ./tacmd login -s hostname
+
+2) Then disable all SDA functions so that nothing will happen while
+making configuration changes below
+    ./tacmd suspendsda
+
+3) Run this command and get the current version of the MQ agent which
+will be needed in the next step (this may need to be run on the agent,
+I'm not sure)
+    ./tacmd listsystems  -d
+
+4) Turn on SDA for the agent that you want to enable it for, I think in
+your case this will be the MQ agent, and put the 8 character version
+(from step 3 above) after the -v parameter, I'm not sure what this value
+is so I just put in 06300000 for now, just replace it with the right
+value
+    ./tacmd addsdainstalloptions -t MQ -v 06300000
+
+5) use this command to verify which agents are set to use SDA (you
+should see MQ here since the above step enabled it)
+    ./tacmd listsdainstalloptions
+
+6) turn SDA back on so that
+    ./tacmd resumesda
+
+7) At this point you can use this command to see if the application
+support for the MQ agent got updated
+    ./tacmd listappinstallrecs
+
+8) Restore to pre-630 logic
+  ./tacmd addSdaInstallOptions -t default -i on
 --------------------------------------------------------------
 
 COMMREPORT001
