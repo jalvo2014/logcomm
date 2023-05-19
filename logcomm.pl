@@ -2281,7 +2281,7 @@ sub do_rpt {
    my $rpti = scalar keys %advrptx;
    if ($rpti != -1) {
       print OH "\n";
-      print OH "TEMS Audit Reports - Meaning and Recovery suggestions follow\n\n";
+      print OH "Agent Communications Audit report - Meaning and Recovery suggestions follow\n\n";
       foreach $f ( sort { $a cmp $b } keys %advrptx ) {
          next if !defined $advrptx{$f};
          print STDERR "$f missing\n" if !defined $advtextx{$f};
